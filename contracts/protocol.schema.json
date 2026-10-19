@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://localcut.invalid/protocol.schema.json",
+  "title": "Local Cut stdio request and response envelopes",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["protocolVersion", "requestId", "method", "params"],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "requestId": { "type": "integer", "minimum": 1 },
+        "method": { "enum": ["ping", "health", "capabilities", "project_create", "project_open", "project_open_last", "project_save", "timeline_history", "timeline_get", "timeline_command", "timeline_undo", "timeline_redo", "timeline_compile", "revision_list", "revision_generate", "revision_propose", "revision_decide", "project_cache_info", "project_cache_clear", "media_import", "media_relink", "proxy_generate", "models_status", "model_download", "transcription_generate", "transcript_list", "transcript_edit", "transcript_marker", "analysis_catalog", "analysis_run", "analysis_list", "style_recipe_catalog", "style_recipe_propose", "brief_parse", "brief_save", "brief_list", "reference_analyze", "proposal_generate", "planning_generate", "planning_list", "planning_review", "proposal_list", "proposal_decide", "export_generate", "export_list", "export_srt", "job_submit", "job_list", "job_cancel", "job_retry", "runtime_status", "runtime_summarize", "index_build", "index_status", "index_search"] },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["protocolVersion", "requestId", "ok", "result"],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "requestId": { "type": "integer", "minimum": 1 },
+            "ok": { "const": true },
+            "result": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["protocolVersion", "requestId", "ok", "error"],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "requestId": { "type": "integer", "minimum": 1 },
+            "ok": { "const": false },
+            "error": {
+              "type": "object",
+              "required": ["code", "message"],
+              "properties": { "code": { "type": "string" }, "message": { "type": "string" } },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  ]
+}

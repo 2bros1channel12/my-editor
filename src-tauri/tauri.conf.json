@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Local Cut",
+  "version": "0.1.0",
+  "identifier": "app.localcut.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build && npm run service:sidecar && npm run licenses:prepare",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Local Cut", "width": 1440, "height": 900, "minWidth": 1100, "minHeight": 720 }],
+    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; media-src 'self' http://127.0.0.1:*; connect-src ipc: http://ipc.localhost" }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/localcut-service"],
+    "resources": ["../resources/THIRD_PARTY_NOTICES.md", "../resources/licenses/Python-LICENSE.txt", "../resources/licenses/PyInstaller-COPYING.txt", "../resources/licenses/JavaScript-THIRD-PARTY.txt", "../resources/licenses/Rust-THIRD-PARTY.txt"],
+    "shortDescription": "Private local-first video editing assistant"
+  }
+}

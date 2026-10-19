@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localcut-service"
+version = "0.1.0"
+description = "Local service foundation for the Local Cut desktop app"
+requires-python = ">=3.11"
+dependencies = ["jsonschema>=4.23,<5"]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3"]
+bundle = ["pyinstaller==6.22.3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
