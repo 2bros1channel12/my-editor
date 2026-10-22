@@ -62,6 +62,8 @@ if (-not (Test-Path -LiteralPath $pyInstallerLicense -PathType Leaf)) { throw "C
 New-Item -ItemType Directory -Force -Path $licenseDirectory | Out-Null
 Copy-Item -LiteralPath $pythonLicense -Destination (Join-Path $licenseDirectory "Python-LICENSE.txt") -Force
 Copy-Item -LiteralPath $pyInstallerLicense -Destination (Join-Path $licenseDirectory "PyInstaller-COPYING.txt") -Force
+& $buildPython (Join-Path $repoRoot "scripts\prepare-python-notices.py") (Join-Path $licenseDirectory "Python-THIRD-PARTY.txt")
+if ($LASTEXITCODE -ne 0) { throw "Could not stage Python dependency license texts." }
 
 New-Item -ItemType Directory -Force -Path $distDirectory, $workDirectory, $binariesDirectory | Out-Null
 & $buildPython -m PyInstaller --noconfirm --clean --onefile --console --collect-data jsonschema_specifications --name localcut-service --paths (Join-Path $serviceRoot "src") --distpath $distDirectory --workpath $workDirectory --specpath $workDirectory (Join-Path $serviceRoot "sidecar_entry.py")

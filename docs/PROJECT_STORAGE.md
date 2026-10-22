@@ -1,5 +1,7 @@
 # Local Cut project schema and storage
 
+Reviewed model/transcript/project deletion and durable managed-copy ownership are documented in [privacy and storage controls](RELEASE_STORAGE.md). The optional `localcutManagedCopy`, `localcutManagedOriginalUri`, and `localcutManagedOriginalSha256` asset metadata fields identify verified app-created copies; absent ownership metadata is treated conservatively during deletion. These additive metadata fields require no SQLite schema migration.
+
 ## Format and authority
 
 A native project is a directory with a `project.json` metadata sidecar and `project.sqlite3` database. The sidecar identifies the format, stable project ID, display name, version, timebase, and database filename. SQLite is the sole canonical store for editable/project state; JSON is not a second copy of the timeline. Metadata writes and the application-level recent-project pointer use same-directory temporary files, flush, and atomic replacement.

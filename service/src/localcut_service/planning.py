@@ -11,6 +11,7 @@ from .footage_index import _snapshot, _chunks, search_index, index_status
 from .jobs import JobInput, JobOutput
 from .persistence import ProjectStore, _json
 from .model_runtime import strict_json
+from .export_profiles import validate_profile
 
 VERSION = 'written-plan-1'
 GENERATOR = 'localcut-written-planner'
@@ -32,7 +33,7 @@ def covers(ranges, required):
     return cursor>=required['sourceOutTicks']
 def normalized(value): return ' '.join(re.findall(r'\w+',value.casefold()))
 
-def collect_evidence(store,brief_id,asset_id,query='',search_mode='exact',runtime=None,check_cancelled=None,verify_sources=False):
+def collect_evidence(store,brief_id,asset_id,query='',search_mode='exact',runtime=None,check_cancelled=None,verify_sources=False,output_profile=None,output_index=0):
     check=check_cancelled or (lambda:None)
     if not isinstance(query,str) or len(query)>3000 or search_mode not in ('exact','semantic'): raise ValueError('Choose exact or semantic search with a query up to 3,000 characters.')
     brief=next((b for b in store.list_briefs() if b['id']==brief_id),None)
@@ -81,6 +82,16 @@ def collect_evidence(store,brief_id,asset_id,query='',search_mode='exact',runtim
             search['results']=search_index(store,query,mode=search_mode,runtime=runtime,filters={'assetId':asset_id},limit=100)['results']
         else: search['warning']='No current footage index is available. Planning uses the full verified transcript catalog; rebuild the index for search guidance.'
     result={'briefId':brief_id,'briefRevision':brief['revision'],'assetId':asset_id,'query':query,'searchMode':search_mode,'brief':brief,'sourceDurationTicks':asset['duration_ticks'],'candidates':candidates,'requirements':requirements,'requiredRanges':required,'excludedRanges':excluded,'search':search,'analysis':[a for a in data['analyses'] if a['assetId']==asset_id],'snapshotFingerprint':snapshot_fingerprint}
+    profiles=brief['constraints'].get('outputProfiles',[])
+    if output_profile is None and profiles:
+        if type(output_index) is not int or not 0<=output_index<len(profiles): raise ValueError('Invalid output profile index.')
+        output_profile=profiles[output_index]
+    if output_profile is not None:
+        profile=validate_profile(output_profile)
+        if type(output_index) is not int or not 0<=output_index<10: raise ValueError('Invalid output profile index.')
+        framing={'subjectMode':brief['constraints'].get('subjectMode','primary'),'layout':brief['constraints'].get('layout','single')}
+        if framing['subjectMode'] not in ('primary','keep_all') or framing['layout'] not in ('single','stacked'): raise ValueError('Invalid framing constraints in saved brief.')
+        result.update(outputProfile=profile,outputIndex=output_index,framingConstraints=framing)
     result['fingerprint']=hashlib.sha256(_json(result).encode()).hexdigest()
     check(); return result
 
@@ -107,6 +118,12 @@ def validate_written_plan(plan,evidence):
         if plan.get(key)!=evidence.get(key): raise ValueError('Written plan evidence changed or was fabricated: '+key)
     if plan.get('evidenceFingerprint')!=evidence['fingerprint']: raise ValueError('Written plan is stale; generate a new plan.')
     allowed={'hook','sections','unmetRequirements','schemaVersion','planType','briefId','briefRevision','assetId','evidenceFingerprint','candidates','requirements','requiredRanges','excludedRanges','targetDurationTicks','warnings','provenance','reviewVersion','estimatedDurationTicks','query','searchMode'}
+    if 'outputProfile' in evidence:
+        allowed|={'outputProfile','outputIndex','framingConstraints'}
+        for key in ('outputProfile','outputIndex','framingConstraints'):
+            if plan.get(key)!=evidence[key]: raise ValueError('Written plan output constraints were fabricated: '+key)
+        profile=validate_profile(plan['outputProfile'])
+        if plan.get('targetDurationTicks')!=round(profile['targetDurationSeconds']*1e6): raise ValueError('Written plan target duration differs from its output profile.')
     if set(plan)!=allowed or type(plan['reviewVersion']) is not int or plan['reviewVersion']<0: raise ValueError('Invalid written-plan fields or review version.')
     if plan['query']!=evidence['query'] or plan['searchMode']!=evidence['searchMode']: raise ValueError('Written plan search evidence changed.')
     section_keys=set(SECTION['properties'])|{'status','locked','confidence','requirementsSatisfied','estimatedDurationTicks'}
@@ -146,6 +163,7 @@ def validate_written_plan(plan,evidence):
     if any(not covers(active,r) for r in evidence['requiredRanges']): raise ValueError('The written plan omits a required source range.')
     if any(r['requirementId'] not in known for r in plan['unmetRequirements']): raise ValueError('Unknown unmet requirement.')
     derived=recompute_plan(copy.deepcopy(plan))
+    if 'outputProfile' in evidence and derived['estimatedDurationTicks']>round(evidence['outputProfile']['maxDurationSeconds']*1e6): raise ValueError('Selected footage exceeds this output profile maximum duration. Shorten selections or edit the profile; required ranges will not be silently removed.')
     for key in ('estimatedDurationTicks','unmetRequirements'):
         if plan.get(key)!=derived[key]: raise ValueError('Written plan derived totals or requirements are invalid.')
     for actual,expected in zip(plan['sections'],derived['sections']):
@@ -155,16 +173,28 @@ def _model(runtime,check=None):
     if runtime is None: raise ValueError('Configure an installed local generation model before planning.')
     return {k:v for k,v in runtime.select('generation',check_cancelled=check).items() if k in ('name','version','provider','settings')}
 
-def planning_job(store,brief_id,asset_id,runtime,query='',search_mode='exact'):
-    evidence=collect_evidence(store,brief_id,asset_id,query,search_mode,runtime)
+def planning_job(store,brief_id,asset_id,runtime,query='',search_mode='exact',output_profile=None,output_index=0):
+    evidence=collect_evidence(store,brief_id,asset_id,query,search_mode,runtime,output_profile=output_profile,output_index=output_index)
     model=_model(runtime)
-    return JobInput(str(store.root),'planning',{'briefId':brief_id,'assetId':asset_id,'query':query,'searchMode':search_mode},evidence['fingerprint'],pipeline_version=VERSION,asset_id=asset_id,model_id=model['name'],model_version=model['version'],generator_id=GENERATOR,generator_version='1',config={'schemaVersion':1,'model':model},max_attempts=1)
+    payload={'briefId':brief_id,'assetId':asset_id,'query':query,'searchMode':search_mode}
+    if 'outputProfile' in evidence: payload.update(outputProfile=evidence['outputProfile'],outputIndex=evidence['outputIndex'])
+    return JobInput(str(store.root),'planning',payload,evidence['fingerprint'],pipeline_version=VERSION,asset_id=asset_id,model_id=model['name'],model_version=model['version'],generator_id=GENERATOR,generator_version='1',config={'schemaVersion':1,'model':model},max_attempts=1)
+
+def planning_output_jobs(store,brief_id,asset_id,runtime,query='',search_mode='exact'):
+    brief=next((b for b in store.list_briefs() if b['id']==brief_id),None)
+    if brief is None: raise ValueError('Save a creative brief before planning.')
+    profiles=brief['constraints'].get('outputProfiles',[])
+    return [planning_job(store,brief_id,asset_id,runtime,query,search_mode,p,i) for i,p in enumerate(profiles)] if profiles else [planning_job(store,brief_id,asset_id,runtime,query,search_mode)]
 
 class PlanningHandler:
     kind='planning'; retry_safe=True
     def __init__(self,runtime): self.runtime=runtime
     def validate_input(self,payload):
-        if not isinstance(payload,dict) or set(payload)!={'briefId','assetId','query','searchMode'} or any(not isinstance(payload[k],str) for k in payload) or not payload['briefId'] or not payload['assetId'] or len(payload['query'])>3000 or payload['searchMode'] not in ('exact','semantic'): raise ValueError('Invalid written-planning input.')
+        base={'briefId','assetId','query','searchMode'}
+        if not isinstance(payload,dict) or set(payload) not in (base,base|{'outputProfile','outputIndex'}) or any(not isinstance(payload[k],str) for k in base) or not payload['briefId'] or not payload['assetId'] or len(payload['query'])>3000 or payload['searchMode'] not in ('exact','semantic'): raise ValueError('Invalid written-planning input.')
+        if 'outputProfile' in payload:
+            validate_profile(payload['outputProfile'])
+            if type(payload['outputIndex']) is not int or not 0<=payload['outputIndex']<10: raise ValueError('Invalid output index.')
         return payload
     def validate_job(self,job,context=None,store=None):
         self.validate_input(job.payload)
@@ -172,7 +202,7 @@ class PlanningHandler:
         check=context.check_cancelled if context else None
         if _model(self.runtime,check)!=job.config.get('model') or job.model_id!=job.config['model']['name'] or job.model_version!=job.config['model']['version']: raise ValueError('Planning model changed; submit a new job.')
         store=store or ProjectStore.open(Path(job.project_path)); p=job.payload
-        evidence=collect_evidence(store,p['briefId'],p['assetId'],p['query'],p['searchMode'],self.runtime,check,verify_sources=context is not None)
+        evidence=collect_evidence(store,p['briefId'],p['assetId'],p['query'],p['searchMode'],self.runtime,check,verify_sources=context is not None,output_profile=p.get('outputProfile'),output_index=p.get('outputIndex',0))
         if evidence['fingerprint']!=job.source_fingerprint: raise ValueError('Planning evidence changed; generate a fresh plan.')
         return evidence
     def run(self,context,payload):
@@ -187,6 +217,8 @@ class PlanningHandler:
         if any(provenance.get(k)!=expected[v] for k,v in (('modelName','name'),('modelVersion','version'),('provider','provider'),('settings','settings'))) or type(provenance.get('executionMs')) not in (int,float) or not math.isfinite(provenance['executionMs']) or provenance['executionMs']<0: raise ValueError('Planning execution provenance differs from the submitted model.')
         plan={**response['data'],'schemaVersion':1,'planType':'written-rough-cut','briefId':evidence['briefId'],'briefRevision':evidence['briefRevision'],'assetId':evidence['assetId'],'query':evidence['query'],'searchMode':evidence['searchMode'],'evidenceFingerprint':evidence['fingerprint'],'candidates':evidence['candidates'],'requirements':evidence['requirements'],'requiredRanges':evidence['requiredRanges'],'excludedRanges':evidence['excludedRanges'],'targetDurationTicks':round(evidence['brief']['constraints']['targetDurationMinutes']*60_000_000) if evidence['brief']['constraints'].get('targetDurationMinutes') else None,'warnings':['Written suggestions only. Verify original speech, meaning and playback before approval. Requirement matches and confidence are editorial claims, not guarantees.']+([evidence['search']['warning']] if evidence['search']['warning'] else []),'provenance':response['provenance'],'reviewVersion':0}
         for section in plan['sections']: section.update(status='pending',locked=False)
+        if 'outputProfile' in evidence:
+            plan.update(outputProfile=evidence['outputProfile'],outputIndex=evidence['outputIndex'],framingConstraints=evidence['framingConstraints'],targetDurationTicks=round(evidence['outputProfile']['targetDurationSeconds']*1e6))
         recompute_plan(plan); validate_written_plan(plan,evidence)
         context.check_cancelled(); self.validate_job(context.input,context)
         context.report(.9,'validating plan','Validating selected source ranges and required coverage.')

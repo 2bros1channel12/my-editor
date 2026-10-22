@@ -12,6 +12,7 @@ export default function WrittenPlanReview({ bridge, project, onProjectRefresh }:
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<"exact" | "semantic">("exact");
   const [plans, setPlans] = useState<WrittenPlanRecord[]>([]);
+  const [selectedPlanId,setSelectedPlanId] = useState('');
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -44,7 +45,8 @@ export default function WrittenPlanReview({ bridge, project, onProjectRefresh }:
     const timer = window.setInterval(() => void refresh(), 2500);
     return () => window.clearInterval(timer);
   }, [path, bridge]);
-  const record = plans.find(item => item.briefId === briefId && item.plan.assetId === assetId);
+  const matchingPlans=plans.filter(item=>item.briefId===briefId&&item.plan.assetId===assetId);
+  const record = matchingPlans.find(item=>item.id===selectedPlanId)??matchingPlans[0];
   const activeJobs = jobs.filter(job => ["queued", "running", "retrying"].includes(job.state));
   async function generate() {
     if (!project) return;
@@ -57,6 +59,7 @@ export default function WrittenPlanReview({ bridge, project, onProjectRefresh }:
     } catch (error) { if (token === generation.current) setMessage(String(error)); }
     finally { if (token === generation.current) setBusy(false); }
   }
+  async function generateOutputs(){if(!project)return;const token=generation.current;setBusy(true);try{const r=await bridge.request('planning_outputs',{path:project.path,briefId,assetId,...(query.trim()?{query:query.trim(),searchMode:mode}:{})});if(token!==generation.current)return;setMessage(`${r.jobs.length} separate written output plans queued. Review each version independently.`);await refresh();}catch(e){if(token===generation.current)setMessage(String(e));}finally{if(token===generation.current)setBusy(false);}}
   async function review(action: ReviewAction, sectionId?: string, candidateId?: string, order?: string[]) {
     if (!project || !record || record.stale) return;
     const token = generation.current;
@@ -123,6 +126,9 @@ export default function WrittenPlanReview({ bridge, project, onProjectRefresh }:
   return <section className="capability-panel"><h2>Written rough-cut plan</h2><p>Review a source-backed hook and outline. Review decisions save this plan. Use the separate append action to compile approved sections into the timeline.</p>
     <div className="brief-constraints"><label>Planning brief<select value={briefId} onChange={event => { setBriefId(event.target.value); setAlternatives({}); setPlayback(""); }}>{briefs.map(brief => <option key={brief.id} value={brief.id}>Revision {brief.revision} · {brief.constraints.objective}</option>)}</select></label><label>Planning source<select value={assetId} onChange={event => { setAssetId(event.target.value); setAlternatives({}); setPlayback(""); }}>{project.state.assets.map(asset => <option key={String(asset.id)} value={String(asset.id)}>{String(asset.last_known_path ?? asset.original_uri)}</option>)}</select></label><label>Optional evidence search<input value={query} onChange={event => setQuery(event.target.value)} maxLength={3000}/></label><label>Planning search mode<select value={mode} onChange={event => setMode(event.target.value as "exact" | "semantic")}><option value="exact">Exact transcript text</option><option value="semantic">Local semantic search</option></select></label></div>
     <button className="button primary" disabled={busy || !briefId || !assetId || activeJobs.length > 0} onClick={() => void generate()}>Generate written plan</button><button className="button secondary" onClick={() => void refresh()}>Refresh written plans</button>
+    {(briefs.find(b=>b.id===briefId)?.constraints.outputProfiles?.length??0)>1&&<button disabled={busy||!assetId||activeJobs.length>0} onClick={()=>void generateOutputs()}>Generate plans for every reviewed output</button>}
+    {matchingPlans.length>1&&<label>Output plan version<select aria-label="Output plan version" value={record?.id??''} onChange={e=>{setSelectedPlanId(e.target.value);setAlternatives({});setPlayback('');}}>{matchingPlans.map(p=><option key={p.id} value={p.id}>{p.plan.outputProfile?.name??'Source format'} · output {(p.plan.outputIndex??0)+1} · revision {p.revision}</option>)}</select></label>}
+    {record?.plan.outputProfile&&<p aria-label="Plan output constraints">{record.plan.outputProfile.name} · {record.plan.outputProfile.width} × {record.plan.outputProfile.height} · {record.plan.outputProfile.frameRate} fps · {record.plan.outputProfile.targetDurationSeconds}s target / {record.plan.outputProfile.maxDurationSeconds}s maximum · safe margins {Object.entries(record.plan.outputProfile.safeArea).map(([k,v])=>`${k} ${Math.round(v*100)}%`).join(', ')}</p>}
     {activeJobs.map(job => <article key={job.id}><p>{job.stage} · {Math.round(job.progress * 100)}% · {job.message}</p><progress max={1} value={job.progress} aria-label="Planning progress"/><button onClick={() => void cancel(job.id)}>Cancel planning</button></article>)}
     {jobs.filter(job => job.state === "failed").slice(0, 3).map(job => <p role="alert" key={job.id}>Planning failed: {String(job.error?.message ?? job.message ?? "Open Jobs for details, resolve the cause, and generate again.")}</p>)}
     {playback && <video ref={video} src={playback} controls aria-label="Written plan source preview" onLoadedMetadata={() => { if (video.current) video.current.currentTime = seekTime.current; }}/>}<p role="status">{message}</p>

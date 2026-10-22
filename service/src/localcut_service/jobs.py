@@ -17,9 +17,10 @@ from typing import Any, Callable, Generic, Literal, Protocol, TypeVar
 import uuid
 
 from .persistence import ProjectStore, _connect, _json, _now, _sha256_file
+from .storage_lock import STORAGE_LOCK
 
 JobState = Literal["queued", "running", "completed", "failed", "retrying", "cancelled"]
-JobKind = Literal["proxy", "transcription", "analysis", "suggestion", "model_download", "indexing", "rendering", "planning"]
+JobKind = Literal["proxy", "transcription", "analysis", "suggestion", "model_download", "indexing", "rendering", "planning", "reframing"]
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 logger = logging.getLogger("localcut.jobs")
@@ -143,7 +144,7 @@ class JobContextImpl:
         return self.stage_root / f"output{suffix}"
 
 
-HANDLER_KINDS: tuple[JobKind, ...] = ("proxy", "transcription", "analysis", "suggestion", "model_download", "indexing", "rendering", "planning")
+HANDLER_KINDS: tuple[JobKind, ...] = ("proxy", "transcription", "analysis", "suggestion", "model_download", "indexing", "rendering", "planning", "reframing")
 
 
 class JobQueue:
@@ -265,6 +266,10 @@ class JobQueue:
         self.handlers[kind] = handler
 
     def submit(self, job: JobInput) -> dict[str, Any]:
+        with STORAGE_LOCK:
+            return self._submit_locked(job)
+
+    def _submit_locked(self, job: JobInput) -> dict[str, Any]:
         handler = self.handlers.get(job.kind)
         if handler is None:
             raise ValueError(f"Unsupported job kind: {job.kind}")
@@ -293,9 +298,11 @@ class JobQueue:
                 db.execute("INSERT INTO queue_jobs(id,project_path,project_id,kind,payload_json,state,progress,stage,attempts,max_attempts,dedupe_key,source_fingerprint,created_at,updated_at,retry_delay_seconds) VALUES (?,?,?,?,?,'queued',0,'queued',0,?,?,?,?,?,?)", (job_id, str(store.root), store.project_id, job.kind, payload_json, max(1, min(job.max_attempts, 10)), dedupe_key, job.source_fingerprint, now, now, max(0.05, min(float(job.retry_delay_seconds), 60))))
                 db.execute("UPDATE queue_jobs SET input_json=? WHERE id=?", (_json({**asdict(job), "project_path": str(store.root), "payload": validated}), job_id))
                 for dependency in job.dependencies:
-                    dep = db.execute("SELECT id,state FROM queue_jobs WHERE id=?", (dependency,)).fetchone()
+                    dep = db.execute("SELECT id,state,project_id FROM queue_jobs WHERE id=?", (dependency,)).fetchone()
                     if dep is None:
                         raise ValueError(f"Dependency job {dependency} does not exist.")
+                    if dep['project_id'] != store.project_id:
+                        raise ValueError('Job dependencies must belong to the same project.')
                     if dep["state"] in {"failed", "cancelled"}:
                         raise ValueError(f"Dependency job {dependency} is already {dep['state']}.")
                     db.execute("INSERT INTO queue_dependencies(job_id,depends_on) VALUES (?,?)", (job_id, dependency))
@@ -356,6 +363,10 @@ class JobQueue:
         return {"id": job_id, "state": "cancelled" if row["state"] != "running" else "running", "cancelRequested": True}
 
     def retry(self, job_id: str) -> dict[str, Any]:
+        with STORAGE_LOCK:
+            return self._retry_locked(job_id)
+
+    def _retry_locked(self, job_id: str) -> dict[str, Any]:
         with _connect(self.database_path) as db:
             row = db.execute("SELECT state FROM queue_jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
@@ -368,6 +379,36 @@ class JobQueue:
         with self._condition:
             self._condition.notify_all()
         return {"id": job_id, "state": "retrying"}
+
+    def forget_project(self, project_id: str, *, cleanup_staging: bool = True) -> dict[str, Any]:
+        """Purge terminal central queue snapshots after a reviewed project deletion."""
+        with STORAGE_LOCK:
+            with _connect(self.database_path) as db:
+                db.execute('PRAGMA secure_delete=ON')
+                db.execute('BEGIN IMMEDIATE')
+                if db.execute("SELECT 1 FROM queue_jobs WHERE project_id=? AND state IN ('queued','running','retrying')",(project_id,)).fetchone():
+                    raise ValueError('Cancel or finish active project jobs before deleting queue history.')
+                if db.execute('SELECT 1 FROM queue_dependencies d JOIN queue_jobs c ON c.id=d.job_id JOIN queue_jobs p ON p.id=d.depends_on WHERE p.project_id=? AND c.project_id<>?',(project_id,project_id)).fetchone():
+                    raise ValueError('Legacy cross-project job dependencies must be removed before deleting this project.')
+                ids=[r[0] for r in db.execute('SELECT id FROM queue_jobs WHERE project_id=?',(project_id,))]
+                for job_id in ids:
+                    uuid.UUID(job_id)
+                    if cleanup_staging:
+                        self._cleanup_stage(job_id)
+                    else:
+                        # Project staging is part of the reviewed directory
+                        # inventory and is removed by complete project deletion.
+                        root=self.stage_root/job_id
+                        root.resolve().relative_to(self.stage_root.resolve())
+                        if root.is_symlink(): root.unlink(missing_ok=True)
+                        elif root.is_dir(): shutil.rmtree(root)
+                    db.execute('DELETE FROM publications WHERE job_id=?',(job_id,))
+                db.execute('DELETE FROM queue_jobs WHERE project_id=?',(project_id,))
+                db.commit()
+            with _connect(self.database_path) as db:
+                db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                db.execute('VACUUM')
+            return {'forgottenJobs':len(ids)}
 
     def _refresh_shadow(self, job_id: str) -> None:
         row = self._get(job_id)

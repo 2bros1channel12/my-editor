@@ -10,4 +10,8 @@ The Windows Tauri application bundles the locked Rust dependency graph. `license
 
 FFmpeg, speech-recognition weights, and creator-reference media are not included in the installer.
 
+`licenses/Python-THIRD-PARTY.txt` is generated from the exact sidecar build environment and includes installed Python dependency names, versions, declared license metadata, and shipped license/notice files. Build-tool notices are included conservatively as well. This covers packages such as jsonschema, attrs, referencing, and rpds-py; packages without separate installed license files are identified for review.
+
+The optional sample project is generated locally from FFmpeg test patterns and a sine-wave tone, with Local Cut-authored demonstration transcript text and captions. These demonstration additions are offered under CC0-1.0; they contain no downloaded footage, music, speech model, or third-party creator assets. The tone is not speech and the demo transcript is not an inference result.
+
 This inventory does not replace review of the Rust/Cargo dependency licenses or separately acquired FFmpeg and model licenses. Do not treat it as legal approval for distribution.

@@ -82,10 +82,10 @@ def test_audio_bed_is_in_render_snapshot_and_mixed_at_requested_time(tmp_path):
         assert "afade=t=in:d=0.500000" in graph
         assert "afade=t=out:st=1.600000:d=0.400000" in graph
         assert "adelay=delays=1000:all=1" in graph
-        assert "amix=inputs=2" in graph and "alimiter=limit=0.95" in graph
+        assert "amix=inputs=2" in graph and "alimiter=limit=0.891251:level=0:latency=1" in graph
         assert "fade=t=in:st=0:d=0.500000:color=black" in graph
         assert "fade=t=out:st=3.400000:d=0.600000:color=black" in graph
-        assert process.render_args[process.render_args.index("-map", process.render_args.index("-map") + 1) + 1] == "[amixed]"
+        assert process.render_args[process.render_args.index("-map", process.render_args.index("-map") + 1) + 1] == "[afinished]"
         assert {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (video_path, bed_path)} == before
         with _connect(store.database_path) as db:
             assert db.execute("SELECT COUNT(*) FROM exports WHERE project_id=? AND status='completed'", (store.project_id,)).fetchone()[0] == 1

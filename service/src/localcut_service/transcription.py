@@ -65,7 +65,7 @@ def model_status(store, model, *, force=False):
         signature = (stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns,stat.st_ino,digest)
         ready = (not force and VERIFIED_FILES.get(str(path)) == signature) or _sha256_file(path) == digest
         if ready: VERIFIED_FILES[str(path)] = signature
-    return dict(id=model, version=REVISION, bytes=size, requiredRamBytes=ram*1024**3, ready=ready, integrity='verified' if ready else 'missing_or_invalid', license='MIT')
+    return dict(id=model, version=REVISION, bytes=size, requiredRamBytes=ram*1024**3, ready=ready, integrity='verified' if ready else 'missing_or_invalid', license='MIT', source='Hugging Face / ggerganov/whisper.cpp', sourceUrl=f'https://huggingface.co/ggerganov/whisper.cpp/resolve/{REVISION}/ggml-{model}.bin', sha256=digest)
 
 class ModelDownloadHandler:
     kind = 'model_download'

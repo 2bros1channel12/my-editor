@@ -7,6 +7,8 @@ import RevisionSuggestions from "./RevisionSuggestions";
 import WrittenPlanReview from "./WrittenPlanReview";
 import FootageSearch from "./FootageSearch";
 import LocalRuntimePanel from "./LocalRuntimePanel";
+import FirstRunChecks from './FirstRunChecks';
+import PrivacyStoragePanel from './PrivacyStoragePanel';
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { Activity, AudioLines, BriefcaseBusiness, ChevronDown, CircleHelp, Clapperboard, Cpu, FolderOpen, HardDrive, Layers3, Settings2, ShieldCheck, Sparkles, WifiOff, Upload, RefreshCw, ScanSearch } from "lucide-react";
 import { desktopBridge, loadHealth, type DesktopBridge } from "../bridge";
@@ -77,6 +79,12 @@ export default function App({ bridge }: { bridge?: DesktopBridge }) {
   }
 
   async function refreshAfterRevision() { await reopenProject(); setTimelineEpoch(value => value + 1); }
+  async function createSample() {
+    setProjectMessage('Creating the local synthetic sample…');
+    const sample = await activeBridge.request('sample_create');
+    const opened = await activeBridge.request('project_open', {path:sample.path});
+    setLastProject(opened); setTimelineEpoch(n=>n+1); setProjectMessage(sample.notice);
+  }
 
   async function createProject() {
     const name = newProjectName.trim();
@@ -196,6 +204,8 @@ export default function App({ bridge }: { bridge?: DesktopBridge }) {
         <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><span className="crumb-divider">/</span><b>{section}</b></div><div className="topbar-right"><div className="local-badge" title="Media, projects, and inference remain on this device. Explicit model downloads contact their disclosed download host."><span /> LOCAL PROCESSING</div><button className="top-icon" aria-label="Help & shortcuts" aria-haspopup="dialog" onClick={openHelp}><CircleHelp size={17} /></button><div className="top-avatar">E</div></div></header>
         {helpOpen && <div className="help-backdrop"><section className="capability-panel help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" onKeyDown={event => { if (event.key === "Tab") { event.preventDefault(); helpClose.current?.focus(); } }}><div className="timeline-edit-head"><h2 id="help-title">Help & shortcuts</h2><button ref={helpClose} className="button secondary" onClick={closeHelp} autoFocus>Close help</button></div><p>Use the Editor to review the transcript, adjust source ranges, and save a nondestructive timeline.</p><h3>Timeline shortcuts</h3><dl><div><dt>Undo last timeline edit</dt><dd><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Z</kbd></dd></div><div><dt>Redo timeline edit</dt><dd><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd></dd></div></dl><p>Shortcuts are ignored while you type in a text or number field.</p></section></div>}
         {lastProject?.recovery && <aside className="recovery-warning" role="alert"><b>Project recovered from checkpoint · revision {lastProject.recovery.checkpointRevision}</b><span>{lastProject.recovery.message} Last valid project update: {new Date(lastProject.recovery.checkpointUpdatedAt).toLocaleString()}. The exact missing-work interval cannot be determined. Review the recovered timeline and transcript before continuing.</span></aside>}
+        {section==='Projects'&&<FirstRunChecks health={health} profile={capabilities} onCheck={()=>{void refresh();void refreshCapabilities();}} onModels={()=>setSection('Models')} onSample={createSample}/>}
+        {(section==='Settings'||section==='Models')&&<PrivacyStoragePanel bridge={activeBridge} project={lastProject} onDeleted={()=>{setLastProject(null);setJobs([]);setTimelineEpoch(n=>n+1);setProjectMessage('Project deleted. External linked originals were preserved.');setSection('Projects');}}/>}
         {section === "Projects" ? <HealthPage health={health} checking={checking} refresh={refresh} onOpenSettings={() => setSection("Settings")} lastProject={lastProject} projectMessage={projectMessage} importMessage={importMessage} onReopenProject={reopenProject} onOpenProject={() => void openProject()} onImportMedia={importMedia} onRelinkMedia={relinkMedia} pendingReplacement={pendingReplacement} onCancelReplacement={() => setPendingReplacement(null)} onConfirmReplacement={() => pendingReplacement && void relinkMedia(pendingReplacement.assetId, pendingReplacement.candidatePath, true)} onGenerateProxy={generateProxy} onCreateProject={() => setNewProjectOpen(true)} creatingProject={newProjectOpen} projectName={newProjectName} setProjectName={setNewProjectName} createProject={() => void createProject()} onCancelCreate={() => setNewProjectOpen(false)} /> : section === "Settings" ? <><SettingsPage profile={capabilities} refresh={refreshCapabilities} /><LocalRuntimePanel bridge={activeBridge} project={lastProject} /><CacheMaintenancePanel bridge={activeBridge} project={lastProject} /></> : section === "Jobs" ? <JobsPage jobs={jobs} refresh={refreshJobs} onCancel={async (id) => { await activeBridge.request("job_cancel", { jobId: id }); await refreshJobs(); }} onRetry={async (id) => { await activeBridge.request("job_retry", { jobId: id }); await refreshJobs(); }} /> : section === "Plans" ? <WrittenPlanReview bridge={activeBridge} project={lastProject} onProjectRefresh={reopenProject}/> : section === "Search" ? <FootageSearch bridge={activeBridge} project={lastProject}/> : section === "Analysis" ? <AnalysisPage bridge={activeBridge} project={lastProject} onNavigate={navigateFromAnalysis} /> : section === "Editor" ? <><BriefProposalPanel bridge={activeBridge} project={lastProject} onProjectRefresh={refreshAfterRevision}/><RevisionSuggestions bridge={activeBridge} project={lastProject} onProjectRefresh={refreshAfterRevision}/><TimelineEditor key={timelineEpoch} bridge={activeBridge} project={lastProject} onProjectRefresh={reopenProject}/><TranscriptReview bridge={activeBridge} project={lastProject} initialAssetId={transcriptTargetAssetId}/></> : <><LocalRuntimePanel bridge={activeBridge} project={lastProject}/><TranscriptReview bridge={activeBridge} project={lastProject} modelsOnly /></>}
       </main>
     </div>

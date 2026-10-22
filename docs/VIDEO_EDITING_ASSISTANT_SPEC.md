@@ -5,6 +5,8 @@
 
 ## Product summary
 
+Release progress as of 2026-10-21: captions/audio finishing, OTIO interchange, reviewed privacy/storage controls, onboarding and a generated sample are implemented. A Windows x64 NSIS development-preview installer now builds; historical packaging-blocker notes below are superseded by [PACKAGING.md](PACKAGING.md). The MVP goal remains active pending the explicit release gates in [RELEASE_READINESS.md](RELEASE_READINESS.md).
+
 Build a Windows desktop assistant that turns user-owned talking-head and tutorial recordings into a private, reviewable, editable first cut from a natural-language creative brief. It automates transcription and proposes trims, emphasis, and captions. The creator remains in control of every edit; source files are never rewritten.
 
 ### Primary user and problem

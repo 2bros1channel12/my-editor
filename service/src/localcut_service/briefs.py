@@ -4,12 +4,13 @@ from __future__ import annotations
 from typing import Any, Protocol
 import re
 from .reference_traits import validate_traits
+from .export_profiles import parse_output_request, validate_profile
 
 PARSER_ID = "localcut-labeled-brief-parser"
 PARSER_VERSION = "3"
 PLATFORMS = {"unspecified", "youtube", "youtube-shorts", "tiktok", "instagram-reels", "course", "other"}
 RECIPE_IDS = {"custom", "fast-educational", "calm-documentary", "conversational-commentary", "concise-product-review"}
-FIELDS = {"audience", "objective", "tone", "targetDurationMinutes", "aspectRatio", "mustKeep", "mustRemove", "preferredOrder", "schemaVersion", "platform", "desiredOpening", "desiredEnding", "recipeId", "recipeVersion", "styleTraits", "styleReviewed"}
+FIELDS = {"audience", "objective", "tone", "targetDurationMinutes", "aspectRatio", "mustKeep", "mustRemove", "preferredOrder", "schemaVersion", "platform", "desiredOpening", "desiredEnding", "recipeId", "recipeVersion", "styleTraits", "styleReviewed", "outputProfiles", "subjectMode", "layout"}
 EMPTY_TRAITS = {"pacing": "unknown", "averageShotLengthSeconds": None, "jumpCutFrequencyPerMinute": None, "captionDensityPerMinute": None, "punchInFrequencyPerMinute": None, "musicEnergy": "unknown", "humorLevel": "unknown", "narrativeStructure": "unknown"}
 
 
@@ -58,6 +59,16 @@ class DeterministicBriefParser:
         # Unlabeled prose remains an objective draft for user review.
         if not any(line.partition(":")[1] for line in text.splitlines()) and text.strip():
             values["objective"] = text.strip()
+        if re.search(r'\b(vertical|horizontal|square|tiktok|reels|shorts|youtube|both speakers|gameplay above)\b',text,re.I):
+            outputs=parse_output_request(text[:16000])
+            values.update(outputProfiles=outputs['profiles'],subjectMode=outputs['subjectMode'],layout=outputs['layout'])
+            first=outputs['profiles'][0]
+            if values['targetDurationMinutes'] is None: values['targetDurationMinutes']=first['targetDurationSeconds']/60
+            else:
+                for profile in values['outputProfiles']:
+                    profile['targetDurationSeconds']=values['targetDurationMinutes']*60
+                    profile['maxDurationSeconds']=max(profile['maxDurationSeconds'],profile['targetDurationSeconds'])
+            if values['aspectRatio']=='source': values['aspectRatio']={'horizontal':'16:9','vertical':'9:16','square':'1:1'}.get(first['aspect'],'source')
         if overrides is not None:
             if not isinstance(overrides, dict) or set(overrides) - FIELDS:
                 raise ValueError("Brief constraints contain unsupported fields.")
@@ -67,6 +78,14 @@ class DeterministicBriefParser:
 
     @staticmethod
     def _coerce(key: str, value: Any) -> Any:
+        if key == 'outputProfiles':
+            if not isinstance(value,list) or not 1<=len(value)<=10: raise ValueError('Choose between one and ten output profiles.')
+            result=[validate_profile(p) for p in value]
+            if len({p['id'] for p in result})!=len(result): raise ValueError('Output profile IDs must be unique.')
+            return result
+        if key in ('subjectMode','layout'):
+            if not isinstance(value,str) or value not in ({'primary','keep_all'} if key=='subjectMode' else {'single','stacked'}): raise ValueError('Invalid output framing constraint.')
+            return value
         if key == "schemaVersion":
             if type(value) is not int or value != 2: raise ValueError("Unsupported creative brief schema version.")
             return 2

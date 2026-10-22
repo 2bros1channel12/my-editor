@@ -47,4 +47,8 @@ class PreviewServer:
             if existing==path: return f'http://127.0.0.1:{self.server.server_port}{ticket}'
         ticket='/'+secrets.token_urlsafe(32); self.files[ticket]=path
         return f'http://127.0.0.1:{self.server.server_port}{ticket}'
+    def revoke_root(self,root:Path):
+        root=root.resolve()
+        for ticket,path in list(self.files.items()):
+            if path.resolve().is_relative_to(root): self.files.pop(ticket,None)
     def close(self): self.server.shutdown(); self.server.server_close(); self.thread.join()

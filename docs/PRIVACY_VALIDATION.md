@@ -1,5 +1,7 @@
 # Local privacy validation
 
+Implemented privacy/storage controls and remaining release gates are documented in [storage controls](RELEASE_STORAGE.md) and [release readiness](RELEASE_READINESS.md). The current service-level QA evidence, including the 13-stage workflow under denied Python DNS/socket access, is in [release QA](RELEASE_QA.md). The packaged GUI still needs OS-level network-deny validation.
+
 The Python service has three subprocess tests with an audit hook that rejects DNS lookups and outbound socket connections from the service process. Loopback connections remain permitted for local IPC.
 
 - `test_core_local_workflow_completes_with_external_network_denied` starts the real stdio service and checks health, capabilities, project creation, brief parsing, detector catalog loading, and reopening the last project.

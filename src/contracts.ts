@@ -1,15 +1,25 @@
 export const PROTOCOL_VERSION = 1 as const;
 export const SERVICE_METHODS = [
   "ping", "health", "capabilities", "project_create", "project_open", "project_open_last", "project_save", "timeline_history", "timeline_get", "timeline_command", "timeline_undo", "timeline_redo", "timeline_compile", "revision_list", "revision_generate", "revision_propose", "revision_decide",
-  "project_cache_info", "project_cache_clear", "media_import", "media_relink", "proxy_generate", "models_status",
+  "project_cache_info", "project_cache_clear", "media_import", "media_relink", "proxy_generate", "models_status", "privacy_status", "storage_review", "storage_remove", "sample_create",
   "model_download", "transcription_generate", "transcript_list", "transcript_edit", "transcript_marker", "analysis_catalog",
   "analysis_run", "analysis_list", "brief_parse", "brief_save", "brief_list", "style_recipe_catalog", "style_recipe_propose", "reference_analyze", "proposal_generate",
-  "planning_generate", "planning_list", "planning_review", "proposal_list", "proposal_decide", "export_generate", "export_list", "export_srt", "job_submit", "job_list", "job_cancel", "job_retry",
+  "planning_generate", "planning_list", "planning_review", "proposal_list", "proposal_decide", "export_generate", "export_list", "export_srt", "export_otio", "caption_generate", "job_submit", "job_list", "job_cancel", "job_retry",
   "runtime_status", "runtime_summarize", "index_build", "index_status", "index_search",
+  "output_profiles", "output_profile_save", "output_request", "output_variants", "output_variant_save", "output_variant_select", "reframe_generate", "reframe_results", "planning_outputs",
 ] as const;
 export type ServiceMethod = typeof SERVICE_METHODS[number];
 
 export interface ServiceContractMap {
+  planning_outputs: {params:{path:string;briefId:string;assetId:string;query?:string;searchMode?:'exact'|'semantic'};result:{jobs:JobSubmissionResponse[]}};
+  output_profiles: { params: {path:string}; result: OutputProfilesResponse };
+  output_profile_save: { params: {path:string;profile:OutputProfile;expectedRevision:number}; result: OutputProfilesResponse };
+  output_request: { params: {text:string}; result: {profiles:OutputProfile[];subjectMode:'keep_all'|'primary';layout:'stacked'|'single';requiresReview:true} };
+  output_variants: { params: {path:string}; result: OutputVariantsResponse };
+  output_variant_save: { params: {path:string;name:string;profile:OutputProfile;expectedRevision:number;planIds?:string[]}; result: OutputVariantsResponse & {timeline:TimelineDocument} };
+  output_variant_select: { params: {path:string;variantId:string;expectedRevision:number}; result: OutputVariantsResponse & {timeline:TimelineDocument} };
+  reframe_generate: { params: {path:string;clipId:string;profile:OutputProfile;subjectId?:string|null;keepBoth?:boolean}; result: JobSubmissionResponse };
+  reframe_results: { params: {path:string;assetId:string}; result: {results:ReframeAnalysis[]} };
   runtime_status: { params: undefined; result: RuntimeStatus };
   runtime_summarize: { params: { path: string; assetId: string }; result: { assetId: string; transcriptId: string; schemaId: string; suggestionOnly: true; data: { summary: string; topics: string[] }; provenance: ModelExecution } };
   index_build: { params: { path: string; semantic?: boolean; force?: boolean }; result: JobSubmissionResponse };
@@ -38,6 +48,10 @@ export interface ServiceContractMap {
   media_relink: { params: { path: string; assetId: string; candidatePath: string; allowChanged?: boolean }; result: Record<string, unknown> };
   proxy_generate: { params: { path: string; assetId: string }; result: JobSubmissionResponse };
   models_status: { params: { path: string }; result: ModelsResponse };
+  privacy_status: { params: { path: string }; result: PrivacyStatus };
+  storage_review: { params: { path: string; scope: StorageScope; model?: string }; result: StorageReview };
+  storage_remove: { params: { path: string; scope: StorageScope; model?: string; confirmationToken: string }; result: { removed:boolean; scope:StorageScope; bytes:number; projectDeleted:boolean } };
+  sample_create: { params: undefined; result: { path:string; projectId:string; name:string; license:string; notice:string } };
   model_download: { params: { path: string; model: string }; result: JobRecord | { state: "completed"; deduplicated: true } };
   transcription_generate: { params: { path: string; assetId: string; model: string }; result: JobSubmissionResponse };
   transcript_list: { params: { path: string; assetId: string }; result: TranscriptResponse };
@@ -58,9 +72,11 @@ export interface ServiceContractMap {
   proposal_generate: { params: { path: string; assetId: string; briefId: string; transcriptId: string }; result: JobSubmissionResponse };
   proposal_list: { params: { path: string; briefId?: string }; result: { plans: EditProposal[] } };
   proposal_decide: { params: { path: string; planId: string; suggestionId: string; decision: "accepted" | "rejected" | "pending"; expectedRevision: number; createCaptions?: boolean }; result: Record<string, unknown> };
-  export_generate: { params: { path: string; burnCaptions?: boolean }; result: JobSubmissionResponse };
-  export_list: { params: { path: string }; result: { exports: ExportRecord[] } };
+  export_generate: { params: { path: string; burnCaptions?: boolean; options?: RenderOptions }; result: JobSubmissionResponse };
+  export_list: { params: { path: string; previewExportId?: string }; result: { exports: ExportRecord[] } };
   export_srt: { params: { path: string }; result: { relativePath: string; captionCount: number } };
+  export_otio: { params: { path: string }; result: { relativePath: string; warnings: string[] } };
+  caption_generate: { params: { path: string; expectedRevision: number; settings?: { charactersPerSecond: number; lineLength: number; maxLines: number; safeAreaPercent: number; style: 'plain' | 'boxed' | 'large' } }; result: { timeline: TimelineDocument; captionCount: number; warnings: Array<{message:string}> } };
   job_submit: { params: { job: JobInput }; result: JobSubmissionResponse };
   job_list: { params: { projectId?: string; limit?: number }; result: { jobs: JobRecord[] } };
   job_cancel: { params: { jobId: string }; result: JobCommandResponse };
@@ -74,7 +90,7 @@ export const SERVICE_CONTRACT_MAP_ALIGNED: ServiceContractCheck = true;
 export type ServiceParams<M extends ServiceMethod> = ServiceContractMap[M]["params"];
 export type ServiceResult<M extends ServiceMethod> = ServiceContractMap[M]["result"];
 
-export type JobKind = "proxy" | "transcription" | "analysis" | "suggestion" | "model_download" | "indexing" | "rendering" | "planning";
+export type JobKind = "proxy" | "transcription" | "analysis" | "suggestion" | "model_download" | "indexing" | "rendering" | "planning" | "reframing";
 export type JobState = "queued" | "running" | "completed" | "failed" | "retrying" | "cancelled";
 export interface JobSubmissionResponse { id: string; state: JobState; deduplicated?: boolean; output?: Record<string, unknown> | null; }
 export interface JobCommandResponse { id: string; state: JobState; cancelRequested?: boolean; }
@@ -160,16 +176,19 @@ export interface TranscriptResponse { transcripts: Transcript[]; playbackUrl?: s
 export interface AnalysisDetector { id: string; name: string; version: string; settings: Record<string, [number, number, number]>; needsAudio?: boolean; needsVideo?: boolean; needsTranscript?: boolean; }
 export interface AnalysisWarning { detectorId: string; artifactId: string; code: string; message: string; }
 export interface AnalysisResult { id: string; assetId: string; detectorId: string; detectorVersion: string; sourceInTicks: number; sourceOutTicks: number; confidence: number | null; detectorName: string; artifactId: string | null; sourceFingerprint: string; sourceStatus?: "metadata_matches_import" | "changed_since_import" | "unavailable" | "missing_asset" | "unknown"; validity?: "integrity_ok" | "stale" | "invalid" | "unknown"; validityReason?: string; config: Record<string, unknown>; createdAt: string; thumbnailUrl?: string; result: { explanation: string; detectorName: string; detectorVersion: string; signalStrength: number | null; suggestionOnly: true; thumbnailPath?: string; matchedSourceInTicks?: number; matchedSourceOutTicks?: number; sampleIsPoint?: boolean; [key: string]: unknown }; }
-export interface CreativeBrief { id: string; revision: number; briefText: string; constraints: { audience: string; objective: string; tone: string; targetDurationMinutes: number | null; aspectRatio: string; mustKeep: string[]; mustRemove: string[]; preferredOrder: string[]; schemaVersion?: 2; platform?: string; desiredOpening?: string; desiredEnding?: string; recipeId?: string; recipeVersion?: string; styleTraits?: ReferenceTraitProfile["traits"]; styleReviewed?: boolean }; traits?: Record<string, { value: unknown; origin: string; generatorId: string; generatorVersion: string }>; createdAt: string; }
+export interface CreativeBrief { id: string; revision: number; briefText: string; constraints: { audience: string; objective: string; tone: string; targetDurationMinutes: number | null; aspectRatio: string; mustKeep: string[]; mustRemove: string[]; preferredOrder: string[]; schemaVersion?: 2; platform?: string; desiredOpening?: string; desiredEnding?: string; recipeId?: string; recipeVersion?: string; styleTraits?: ReferenceTraitProfile["traits"]; styleReviewed?: boolean;outputProfiles?:OutputProfile[];subjectMode?:"keep_all"|"primary";layout?:"stacked"|"single" }; traits?: Record<string, { value: unknown; origin: string; generatorId: string; generatorVersion: string }>; createdAt: string; }
 export type NarrativeStructureTrait = "unknown" | "chronological" | "problem-solution" | "question-answer" | "step-by-step" | "demonstration-first" | "hook-explanation-summary" | "story-led-lesson" | "before-after";
 export interface ReferenceTraitProfile { generatorId: string; generatorVersion: string; analyzedSeconds: number; sampleFrames: number; explanation: string; ephemeral: boolean; traits: { pacing: "slow" | "moderate" | "fast" | "unknown"; averageShotLengthSeconds: number | null; jumpCutFrequencyPerMinute: number | null; captionDensityPerMinute: number | null; punchInFrequencyPerMinute: number | null; musicEnergy: "low" | "moderate" | "high" | "unknown"; humorLevel: "low" | "moderate" | "high" | "unknown"; narrativeStructure: NarrativeStructureTrait; }; }
 export interface ProposalOperation { id: string; type: "include_source_range" | "exclude_source_range" | "punch_in" | "reorder_passages"; assetId: string; sourceInTicks: number; sourceOutTicks: number; text?: string; status: "pending" | "accepted" | "rejected"; confidence: number | null; protected?: boolean; timingUncertain?: boolean; rationale: string; [key: string]: unknown; }
 export interface ProposalStyleGuidance { trait: "pacing"; value: "slow" | "moderate" | "fast"; origin: string; generatorId: string; generatorVersion: string; gapThresholdSeconds: number; explanation: string; }
 export interface ProposalPunchInGuidance { trait: "punchInFrequencyPerMinute"; value: number; origin: string; generatorId: string; generatorVersion: string; maximumSuggestions: number; explanation: string; }
 export interface EditProposal { id: string; briefId: string; revision: number; status: string; plan: { assetId: string; operations: ProposalOperation[]; warnings: Array<{ severity: string; message: string }>; styleGuidance?: ProposalStyleGuidance | null; punchInGuidance?: ProposalPunchInGuidance | null; noAutomaticChanges: true }; createdAt: string; }
-export interface ModelStatus { id: string; version: string; bytes: number; requiredRamBytes: number; ready: boolean; integrity: string; }
+export interface ModelStatus { id: string; version: string; bytes: number; requiredRamBytes: number; ready: boolean; integrity: string; license?:string; source?:string; sourceUrl?:string; sha256?:string; }
 export interface ModelsResponse { models: ModelStatus[]; recommended: string; backendAvailable: boolean; detail: string; }
-export interface ExportRecord { id: string; timelineId: string; status: string; relativePath: string; format: string; settings: Record<string, unknown>; startedAt: string; completedAt: string | null; checksumSha256: string | null; errorCode: string | null; }
+export type StorageScope = 'model' | 'transcripts' | 'project';
+export interface PrivacyStatus { projectId:string; telemetryEnabled:false; mediaUploadEnabled:false; network:{policy:string;activeDownloads:Array<{id:string;stage:string;progress:number}>;localRuntimeUrl:string|null};storage:{projectBytes:number;modelsBytes:number;transcriptsBytes:number;cacheBytes:number};models:Array<ModelStatus & {source:string;sourceUrl:string;sha256:string}>; }
+export interface StorageReview { scope:StorageScope;model:string|null;confirmationToken:string;activeJobs:Array<{id:string}>;canRemove:boolean;bytes:number;files:number;detail:string; }
+export interface ExportRecord { id: string; timelineId: string; status: string; relativePath: string; format: string; settings: Record<string, unknown>; startedAt: string; completedAt: string | null; checksumSha256: string | null; errorCode: string | null; playbackUrl?: string; }
 
 export interface StyleRecipe { id: string; name: string; description: string; version?: string; traits?: ReferenceTraitProfile["traits"]; }
 export interface StyleRecipeProposal { recipeId: string; recipeVersion: string; traits: ReferenceTraitProfile["traits"]; requiresReview: true; explanation: string; generatorId: string; generatorVersion: string; }
@@ -184,10 +203,15 @@ export interface FootageMatch { id: string; assetId: string; transcriptId: strin
 export interface PlanningSelection { candidateId: string; reason: string; confidence: number; confidenceReason: string; requirementIds: string[]; }
 export interface PlanningCandidate { id: string; assetId: string; transcriptId: string; sourceInTicks: number; sourceOutTicks: number; excerpt: string; originalText: string; transcriptEdited: boolean; uncertain: boolean; flags: string[]; sourceConfidence: number | null; }
 export interface WrittenPlanSection { id: string; title: string; purpose: string; selections: PlanningSelection[]; alternatives: PlanningSelection[]; alternativeNote: string; status: "pending" | "approved" | "rejected"; locked: boolean; confidence: number; requirementsSatisfied: string[]; estimatedDurationTicks: number; }
-export interface WrittenPlan { schemaVersion: number; planType: "written-rough-cut"; briefId: string; briefRevision: number; assetId: string; evidenceFingerprint: string; query?: string; searchMode?: "exact" | "semantic"; candidates: PlanningCandidate[]; requirements: { id: string; description: string; kind: string }[]; requiredRanges: { id: string; sourceInTicks: number; sourceOutTicks: number }[]; excludedRanges: { id: string; sourceInTicks: number; sourceOutTicks: number }[]; hook: { candidateId: string | null; reason: string } | null; sections: WrittenPlanSection[]; unmetRequirements: { requirementId: string; reason: string }[]; estimatedDurationTicks: number; targetDurationTicks: number | null; warnings: string[]; provenance: ModelExecution; reviewVersion: number; }
+export interface WrittenPlan { schemaVersion: number;outputProfile?:OutputProfile;outputIndex?:number;framingConstraints?:Record<string,unknown>; planType: "written-rough-cut"; briefId: string; briefRevision: number; assetId: string; evidenceFingerprint: string; query?: string; searchMode?: "exact" | "semantic"; candidates: PlanningCandidate[]; requirements: { id: string; description: string; kind: string }[]; requiredRanges: { id: string; sourceInTicks: number; sourceOutTicks: number }[]; excludedRanges: { id: string; sourceInTicks: number; sourceOutTicks: number }[]; hook: { candidateId: string | null; reason: string } | null; sections: WrittenPlanSection[]; unmetRequirements: { requirementId: string; reason: string }[]; estimatedDurationTicks: number; targetDurationTicks: number | null; warnings: string[]; provenance: ModelExecution; reviewVersion: number; }
 export interface WrittenPlanRecord { id: string; briefId: string; revision: number; status: string; plan: WrittenPlan; stale?: boolean; staleReason?: string | null; }
 
 export type TimelineClip = PersistedProjectState["timelineItems"][number];
+export interface OutputProfile { schemaVersion:1;id:string;name:string;platform:string;aspect:'horizontal'|'vertical'|'square'|'original'|'custom';width:number;height:number;frameRate:number;targetDurationSeconds:number;maxDurationSeconds:number;safeArea:{top:number;right:number;bottom:number;left:number};fit:'crop'|'contain' }
+export interface OutputProfilesResponse { revision:number;presets:OutputProfile[];profile:OutputProfile|null }
+export interface OutputVariantsResponse { revision:number;activeId:string|null;variants:{id:string;name:string;profile:OutputProfile;planIds:string[]}[] }
+export interface ReframeAnalysis {assetId:string;clipId?:string;sourceInTicks?:number;sourceOutTicks?:number;profile?:OutputProfile;outputWidth?:number;outputHeight?:number;sourceSha256:string;sourceWidth:number;sourceHeight:number;detector:string;detectorVersion:string;version:string;selectedSubjectId:string|null;subjects:{id:string;kind:string;label:string;firstSourceTime:number}[];keyframes:Array<{sourceTicks:number;x:number;y:number;width:number;height:number;layoutMode?:'crop'|'fit';confidence?:number;subjectId?:string|null;locked?:boolean;explanation?:string}>;[key:string]:unknown}
+export interface RenderOptions { mode: 'preview' | 'final'; resolution: 480 | 720 | 1080; frameRate: 24 | 25 | 30 | 50 | 60; speechGainDb: number; normalize: boolean; loudnessLufs: number; noiseReduction: boolean; captionStyle: 'plain' | 'boxed' | 'large'; safeArea: number; outputProfile?:OutputProfile|null; }
 export interface TimelineTrack { id: string; kind: "video" | "audio" | "caption"; name: string; }
 export interface TimelineMarker { id: string; atTicks: number; label: string; sectionId?: string; planId?: string; }
 export interface TimelineDocument { schemaVersion: 2; policies: RevisionPolicies; revision: number; tracks: TimelineTrack[]; clips: TimelineClip[]; captions: NonNullable<PersistedProjectState["captions"]>; markers: TimelineMarker[]; durationTicks: number; canUndo: boolean; canRedo: boolean; }
@@ -196,6 +220,7 @@ export interface RevisionEvidence { assetId: string; sourceInTicks: number; sour
 export interface RevisionSuggestion { id: string; kind: string; title?: string; operationSummary?: string; evidenceNotes?: string[]; status: string; stale?: boolean; staleReason?: string | null; baseRevision: number; evidenceFingerprint: string; explanation: string; evidence: RevisionEvidence[]; timelineInTicks: number; timelineOutTicks: number; operations: TimelineCommand[]; durationDeltaTicks: number; preview: {before: TimelineClip[]; after: TimelineClip[]}; warnings: string[]; }
 export interface RevisionListing { suggestions: RevisionSuggestion[]; revision: number; warnings: string[]; }
 export type TimelineCommand =
+  | {type:'reframe';clipId:string;settings:{enabled:boolean;locked:boolean;mode:'crop'|'fit';subjectId:string|null;keyframes:Array<{sourceTicks:number;x:number;y:number;width:number;height:number}>;layout?:'single'|'stacked';regions?:Array<{x:number;y:number;width:number;height:number}>}}
   | {type: "remove_range"; clipId: string; sourceInTicks: number; sourceOutTicks: number; ripple: boolean}
   | {type: "crop"; clipId: string; cropPreset: "full_frame" | "punch_in_110" | "punch_in_125"}
   | {type: "protect_ranges"; ranges: {assetId: string; sourceInTicks: number; sourceOutTicks: number; phrase: string}[]}
@@ -212,6 +237,7 @@ export type TimelineCommand =
   | { type: "fades"; clipId: string; fadeInTicks: number; fadeOutTicks: number }
   | { type: "caption"; clipId: string; text: string; sourceInTicks?: number; sourceOutTicks?: number }
   | { type: "edit_caption"; captionId: string; text: string }
+  | { type: 'music_rights'; clipId: string; rights: string; attribution: string }
   | { type: "marker"; atTicks: number; label: string; markerId?: string }
   | { type: "remove_marker"; markerId: string }
   | { type: "track"; kind: "video" | "audio"; name: string };

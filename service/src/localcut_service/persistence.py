@@ -733,6 +733,7 @@ class ProjectStore:
         asset_id = str(uuid.uuid4())
         now = _now()
         fingerprint = _sha256_file(source)
+        metadata = {k:v for k,v in (metadata or {}).items() if not k.startswith('localcutManaged')}
         with _connect(self.database_path) as connection:
             connection.execute(
                 "INSERT INTO assets(id,project_id,original_uri,path_mode,last_known_path,size_bytes,mtime_ns,sha256,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -778,6 +779,21 @@ class ProjectStore:
         self.set_media_metadata(asset_id, metadata, probe_tool=probe_tool, probe_version=probe_version, duration_ticks=duration_ticks, timebase_num=timebase_num, timebase_den=timebase_den)
         return {"assetId": asset_id, "status": "imported", "match": None}
 
+    def _mark_managed_copy(self, asset_id: str, source: Path, digest: str) -> None:
+        """Record ownership only after this app created and verified a new copy."""
+        with _connect(self.database_path) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row=connection.execute('SELECT original_uri,path_mode,last_known_path,metadata_json FROM assets WHERE id=? AND project_id=?',(asset_id,self.project_id)).fetchone()
+            if row is None or row['path_mode']!='project-relative': raise ProjectError('Managed copy was not registered inside this project.')
+            destination=(self.root/row['original_uri']).resolve()
+            destination.relative_to((self.root/'media').resolve())
+            if destination==source.resolve(): raise ProjectError('Managed storage requires a distinct verified copy.')
+            metadata=json.loads(row['metadata_json'])
+            metadata.update(localcutManagedCopy=True,localcutManagedOriginalUri=source.as_uri(),localcutManagedOriginalSha256=digest)
+            connection.execute('UPDATE assets SET metadata_json=? WHERE id=?',(_json(metadata),asset_id))
+            revision=self._record_recovery_state(connection); connection.commit()
+        self._checkpoint_if_due(revision)
+
     def import_asset_managed(self, source_path: Path, metadata: dict[str, Any], *, probe_tool: str, probe_version: str, duration_ticks: int | None = None, timebase_num: int = 1, timebase_den: int = 1_000_000, project_id: str | None = None) -> dict[str, Any]:
         """Copy a source into the project atomically, then register only the verified copy."""
         source = source_path.expanduser().resolve(strict=True)
@@ -790,7 +806,10 @@ class ProjectStore:
             if duplicate.get("contentChanged"):
                 raise ProjectError("This path belongs to an imported asset but its contents changed. Use Relink source and confirm replacement so derived artifacts are invalidated.")
             if duplicate.get("pathMode") == "project-relative":
-                return {**duplicate, "status": "duplicate", "storageMode": "managed"}
+                with _connect(self.database_path) as connection:
+                    existing=connection.execute('SELECT metadata_json FROM assets WHERE id=?',(duplicate['assetId'],)).fetchone()
+                if existing and json.loads(existing['metadata_json']).get('localcutManagedCopy') is True:
+                    return {**duplicate, "status": "duplicate", "storageMode": "managed"}
             # Explicit managed import upgrades an existing linked asset in place.
             asset_id = str(duplicate["assetId"])
             media_dir = self.root / "media"; media_dir.mkdir(parents=True, exist_ok=True)
@@ -804,8 +823,12 @@ class ProjectStore:
                 os.replace(temporary, destination)
                 try:
                     self.relink_asset(asset_id,destination,metadata=metadata,probe_tool=probe_tool,probe_version=probe_version,duration_ticks=duration_ticks,timebase_num=timebase_num,timebase_den=timebase_den)
+                    self._mark_managed_copy(asset_id,source,digest)
                 except Exception:
-                    destination.unlink(missing_ok=True); raise
+                    with _connect(self.database_path) as connection:
+                        registered=connection.execute('SELECT last_known_path FROM assets WHERE id=?',(asset_id,)).fetchone()
+                    if not registered or Path(registered['last_known_path']).resolve()!=destination.resolve(): destination.unlink(missing_ok=True)
+                    raise
             finally:
                 temporary.unlink(missing_ok=True)
             return {**duplicate,"status":"imported","storageMode":"managed","convertedExistingAsset":True}
@@ -824,8 +847,11 @@ class ProjectStore:
             try:
                 asset_id = self.add_asset(destination, metadata, project_id=project_id)
                 self.set_media_metadata(asset_id, metadata, probe_tool=probe_tool, probe_version=probe_version, duration_ticks=duration_ticks, timebase_num=timebase_num, timebase_den=timebase_den)
+                self._mark_managed_copy(asset_id,source,digest)
             except Exception:
-                destination.unlink(missing_ok=True)
+                with _connect(self.database_path) as connection:
+                    registered=connection.execute('SELECT 1 FROM assets WHERE last_known_path=?',(str(destination),)).fetchone()
+                if not registered: destination.unlink(missing_ok=True)
                 raise
             return {"assetId": asset_id, "status": "imported", "match": None, "storageMode": "managed"}
         finally:
@@ -870,7 +896,12 @@ class ProjectStore:
                     if references_asset(json.loads(plan["plan_json"] or "{}")):
                         connection.execute("UPDATE edit_plans SET status='stale' WHERE id=?", (plan["id"],))
                 connection.execute("UPDATE exports SET status='stale' WHERE timeline_id IN (SELECT DISTINCT timeline_id FROM timeline_items WHERE asset_id=?)", (asset_id,))
-            connection.execute("UPDATE assets SET original_uri=?,path_mode=?,last_known_path=?,size_bytes=?,mtime_ns=?,sha256=?,duration_ticks=?,timebase_num=?,timebase_den=?,metadata_json=?,relink_status='available' WHERE id=? AND project_id=?", (source_ref,path_mode,str(candidate),stat.st_size,stat.st_mtime_ns,digest,duration_ticks,timebase_num,timebase_den,_json(metadata),asset_id,self.project_id))
+            asset_metadata={k:v for k,v in metadata.items() if not k.startswith('localcutManaged')}
+            previous_metadata=json.loads(row['metadata_json'])
+            previous_path=(self.root/row['original_uri'] if row['path_mode']=='project-relative' else Path(row['last_known_path'])).resolve()
+            if candidate == previous_path and previous_metadata.get('localcutManagedCopy') is True:
+                asset_metadata.update({k:v for k,v in previous_metadata.items() if k.startswith('localcutManaged')})
+            connection.execute("UPDATE assets SET original_uri=?,path_mode=?,last_known_path=?,size_bytes=?,mtime_ns=?,sha256=?,duration_ticks=?,timebase_num=?,timebase_den=?,metadata_json=?,relink_status='available' WHERE id=? AND project_id=?", (source_ref,path_mode,str(candidate),stat.st_size,stat.st_mtime_ns,digest,duration_ticks,timebase_num,timebase_den,_json(asset_metadata),asset_id,self.project_id))
             connection.execute("INSERT OR REPLACE INTO media_metadata(asset_id,probe_tool,probe_version,metadata_json,created_at) VALUES (?,?,?,?,?)", (asset_id,probe_tool,probe_version,_json(metadata),_now()))
             project = connection.execute("SELECT state_revision FROM projects WHERE id=?", (self.project_id,)).fetchone()
             revision = int(project["state_revision"]) + 1
@@ -878,7 +909,7 @@ class ProjectStore:
             state["revision"] = revision
             for asset in state.get("assets", []):
                 if asset.get("id") == asset_id:
-                    asset.update({"original_uri":source_ref,"path_mode":path_mode,"last_known_path":str(candidate),"size_bytes":stat.st_size,"mtime_ns":stat.st_mtime_ns,"sha256":digest,"duration_ticks":duration_ticks,"timebase_num":timebase_num,"timebase_den":timebase_den,"metadata_json":_json(metadata),"relink_status":"available"})
+                    asset.update({"original_uri":source_ref,"path_mode":path_mode,"last_known_path":str(candidate),"size_bytes":stat.st_size,"mtime_ns":stat.st_mtime_ns,"sha256":digest,"duration_ticks":duration_ticks,"timebase_num":timebase_num,"timebase_den":timebase_den,"metadata_json":_json(asset_metadata),"relink_status":"available"})
             self._write_checkpoint_locked(connection,self.project_id,revision,state)
             connection.commit()
         self._checkpoint_if_due(revision)

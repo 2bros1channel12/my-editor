@@ -1,8 +1,14 @@
 # Local Cut desktop foundation
 
+Output profiles, independent output versions and local crop tracking are documented in [Output formats and reframing](docs/OUTPUT_FORMATS.md). Reinstall service dependencies after updating to include the pinned local OpenCV detector. Earlier installers must be rebuilt to include this feature.
+
 This is the Tauri/React/Python local-first video editor described in [`docs/VIDEO_EDITING_ASSISTANT_SPEC.md`](docs/VIDEO_EDITING_ASSISTANT_SPEC.md). It includes local project creation, nondestructive timeline primitives, transcript review, proxy assets, advisory footage analysis, reviewable transcript-led first-cut proposals with optional explicit passage ordering, neutral local reference-trait analysis, local H.264/AAC rendering with optional burned-in captions, and SRT sidecar export. The Windows service-sidecar build path is implemented; the full installer and release validation remain unverified. See [Windows sidecar packaging](docs/PACKAGING.md).
 
 ## Working from another PC
+
+Release status, privacy/storage controls, measured workflow evidence and unfinished release gates are recorded in [release readiness](docs/RELEASE_READINESS.md). Windows preview installer build details are in [packaging](docs/PACKAGING.md).
+
+The Editor now includes word-derived editable captions, speech/audio finishing controls, preview-quality and final H.264/AAC rendering, in-app playback of verified renders, SRT export, and editable OTIO interchange. See [export and finishing](docs/EXPORT.md) for settings, interoperability limits, and test commands.
 
 See [new PC setup](docs/NEW_PC_SETUP.md) for cloning, prerequisites, starting the desktop app, and moving editing projects safely.
 

@@ -12,11 +12,12 @@ const PROTOCOL_VERSION: u16 = 1;
 const ERROR_TAIL_LIMIT: usize = 4_000;
 pub const SUPPORTED_METHODS: &[&str] = &[
     "ping", "health", "capabilities", "project_create", "project_open", "project_open_last", "project_save", "timeline_history", "timeline_get", "timeline_command", "timeline_undo", "timeline_redo", "timeline_compile", "revision_list", "revision_generate", "revision_propose", "revision_decide",
-    "project_cache_info", "project_cache_clear", "media_import", "media_relink", "proxy_generate", "models_status",
+    "project_cache_info", "project_cache_clear", "media_import", "media_relink", "proxy_generate", "models_status", "privacy_status", "storage_review", "storage_remove", "sample_create",
     "model_download", "transcription_generate", "transcript_list", "transcript_edit", "transcript_marker", "analysis_catalog",
     "analysis_run", "analysis_list", "style_recipe_catalog", "style_recipe_propose", "brief_parse", "brief_save", "brief_list", "reference_analyze", "proposal_generate",
-    "planning_generate", "planning_list", "planning_review", "proposal_list", "proposal_decide", "export_generate", "export_list", "export_srt", "job_submit", "job_list", "job_cancel", "job_retry",
+    "planning_generate", "planning_list", "planning_review", "proposal_list", "proposal_decide", "export_generate", "export_list", "export_srt", "export_otio", "caption_generate", "job_submit", "job_list", "job_cancel", "job_retry",
     "runtime_status", "runtime_summarize", "index_build", "index_status", "index_search",
+    "output_profiles", "output_profile_save", "output_request", "output_variants", "output_variant_save", "output_variant_select", "reframe_generate", "reframe_results", "planning_outputs",
 ];
 
 pub fn supports_method(method: &str) -> bool {
@@ -25,6 +26,13 @@ pub fn supports_method(method: &str) -> bool {
 
 fn result_has_fields(result: &Value, method: &str) -> bool {
     let required: &[&str] = match method {
+        "planning_outputs" => &["jobs"],
+        "output_profiles" | "output_profile_save" => &["revision", "presets", "profile"],
+        "output_request" => &["profiles", "subjectMode", "layout", "requiresReview"],
+        "output_variants" => &["revision", "activeId", "variants"],
+        "output_variant_save" | "output_variant_select" => &["revision", "activeId", "variants", "timeline"],
+        "reframe_generate" => &["id", "state"],
+        "reframe_results" => &["results"],
         "revision_list" | "revision_generate" | "revision_propose" => &["suggestions", "revision", "warnings"],
         "revision_decide" => &["suggestion", "timeline"],
         "timeline_get" | "timeline_command" | "timeline_undo" | "timeline_redo" | "timeline_compile" => &["timeline"],
@@ -56,6 +64,12 @@ fn result_has_fields(result: &Value, method: &str) -> bool {
         "planning_list" | "proposal_list" => &["plans"],
         "export_list" => &["exports"],
         "export_srt" => &["relativePath", "captionCount"],
+        "privacy_status" => &["projectId", "telemetryEnabled", "mediaUploadEnabled", "network", "storage", "models"],
+        "storage_review" => &["scope", "confirmationToken", "canRemove", "bytes", "files", "detail", "activeJobs"],
+        "storage_remove" => &["removed", "scope", "bytes", "projectDeleted"],
+        "sample_create" => &["path", "projectId", "name", "license", "notice"],
+        "export_otio" => &["relativePath", "warnings"],
+        "caption_generate" => &["timeline", "captionCount", "warnings"],
         "job_list" => &["jobs"],
         "proxy_generate" | "transcription_generate" | "analysis_run" | "planning_generate" | "proposal_generate" | "export_generate" | "job_submit" | "job_cancel" | "job_retry" => &["id", "state"],
         "model_download" if result.get("deduplicated") == Some(&Value::Bool(true)) => &["state", "deduplicated"],
@@ -66,6 +80,11 @@ fn result_has_fields(result: &Value, method: &str) -> bool {
     let Some(object) = result.as_object() else { return false };
     if !required.iter().all(|field| object.contains_key(*field)) { return false; }
     let arrays: &[&str] = match method {
+        "planning_outputs" => &["jobs"],
+        "output_profiles" | "output_profile_save" => &["presets"],
+        "output_request" => &["profiles"],
+        "output_variants" | "output_variant_save" | "output_variant_select" => &["variants"],
+        "reframe_results" => &["results"],
         "revision_list" | "revision_generate" | "revision_propose" => &["suggestions", "warnings"],
         "runtime_status" => &["models"],
         "index_search" => &["results"],
@@ -85,6 +104,7 @@ fn result_has_fields(result: &Value, method: &str) -> bool {
         _ => &[],
     };
     let objects: &[&str] = match method {
+        "output_variant_save" | "output_variant_select" => &["timeline"],
         "revision_decide" => &["suggestion", "timeline"],
         "timeline_get" | "timeline_command" | "timeline_undo" | "timeline_redo" | "timeline_compile" => &["timeline"],
         "planning_review" => &["plan"],
@@ -102,6 +122,9 @@ fn result_has_fields(result: &Value, method: &str) -> bool {
     };
     if arrays.iter().any(|field| !object[*field].is_array()) || objects.iter().any(|field| !object[*field].is_object()) { return false; }
     match method {
+        "output_profiles" | "output_profile_save" => object["revision"].as_u64().is_some() && (object["profile"].is_null() || object["profile"].is_object()),
+        "output_variants" | "output_variant_save" | "output_variant_select" => object["revision"].as_u64().is_some() && (object["activeId"].is_null() || object["activeId"].is_string()),
+        "output_request" => object["requiresReview"] == Value::Bool(true) && matches!(object["subjectMode"].as_str(),Some("primary" | "keep_all")) && matches!(object["layout"].as_str(),Some("single" | "stacked")),
         "revision_list" | "revision_generate" | "revision_propose" => object["revision"].as_u64().is_some(),
         "runtime_status" => object["available"].is_boolean() && object["provider"].is_string(),
         "runtime_summarize" => object["suggestionOnly"] == Value::Bool(true),
@@ -117,6 +140,12 @@ fn result_has_fields(result: &Value, method: &str) -> bool {
         "style_recipe_propose" => object["requiresReview"] == Value::Bool(true) && object["recipeId"].is_string() && object["recipeVersion"].is_string(),
         "brief_parse" => object["parserId"].is_string() && object["parserVersion"].is_string(),
         "export_srt" => object["relativePath"].is_string() && object["captionCount"].is_number(),
+        "privacy_status" => object["projectId"].is_string() && object["telemetryEnabled"] == false && object["mediaUploadEnabled"] == false && object["network"].is_object() && object["storage"].is_object() && object["models"].is_array(),
+        "storage_review" => object["scope"].is_string() && object["confirmationToken"].is_string() && object["canRemove"].is_boolean() && object["bytes"].is_number() && object["files"].is_number() && object["detail"].is_string() && object["activeJobs"].is_array(),
+        "storage_remove" => object["removed"].is_boolean() && object["scope"].is_string() && object["bytes"].is_number() && object["projectDeleted"].is_boolean(),
+        "sample_create" => ["path", "projectId", "name", "license", "notice"].iter().all(|key| object[*key].is_string()),
+        "export_otio" => object["relativePath"].is_string() && object["warnings"].is_array(),
+        "caption_generate" => object["timeline"].is_object() && object["captionCount"].is_number() && object["warnings"].is_array(),
         "model_download" if object.get("deduplicated") == Some(&Value::Bool(true)) => object["state"].as_str() == Some("completed"),
         "index_build" | "model_download" | "proxy_generate" | "transcription_generate" | "analysis_run" | "planning_generate" | "proposal_generate" | "export_generate" | "job_submit" | "job_cancel" | "job_retry" => object["id"].is_string() && object["state"].is_string(),
         _ => true,
@@ -402,6 +431,19 @@ mod tests {
             assert!(!result_has_fields(&json!({"revision":2}), method));
             assert!(!result_has_fields(&json!({"suggestions":[],"revision":"two","warnings":[]}), method));
         }
+    }
+
+    #[test]
+    fn validates_output_and_framing_response_envelopes() {
+        for method in ["output_profiles", "output_profile_save"] {
+            assert!(supports_method(method));
+            assert!(result_has_fields(&json!({"revision":1,"presets":[],"profile":null}),method));
+            assert!(!result_has_fields(&json!({"revision":"one","presets":[],"profile":null}),method));
+        }
+        assert!(result_has_fields(&json!({"profiles":[],"subjectMode":"keep_all","layout":"stacked","requiresReview":true}),"output_request"));
+        assert!(!result_has_fields(&json!({"profiles":[],"subjectMode":"primary","layout":"single","requiresReview":false}),"output_request"));
+        assert!(!result_has_fields(&json!({"results":{}}),"reframe_results"));
+        assert!(result_has_fields(&json!({"jobs":[]}),"planning_outputs"));
     }
 
     #[test]

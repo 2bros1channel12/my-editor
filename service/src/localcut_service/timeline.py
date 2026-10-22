@@ -24,6 +24,8 @@ LIMIT = 50
 PROPERTY_FIELDS={'role','userSupplied','orderSuggestionId','audioGainDb','linkedAudio','fadeInTicks','fadeOutTicks','videoFadeInTicks','videoFadeOutTicks','cropPreset','originSuggestionId','proposalRationale','proposalConfidence','punchInSuggestionIds','sourceProvenance','planId','sectionId','candidateId','sectionLabel','modelProvenance','linkedClipId','text','generatedBy','generatorVersion','transcriptId'}
 
 def _id(): return str(uuid.uuid4())
+PROPERTY_FIELDS.update({'rights','attribution'})
+PROPERTY_FIELDS.add('reframe')
 def _track_kind(clip): return 'audio' if clip['itemType']=='audio' else 'caption' if clip['itemType']=='caption' else 'video'
 def _provenance(clips,state):
     assets={a['id']:a for a in state['assets']}
@@ -111,6 +113,10 @@ def _validate_document(doc,state):
         props=clip.get('properties',{})
         if not isinstance(props,dict): raise ValueError('Clip properties must be an object.')
         if set(props)-PROPERTY_FIELDS: raise ValueError('Unknown clip properties. Migrate the timeline before editing.')
+        if 'reframe' in props:
+            from .reframe_engine import validate_reframe
+            validate_reframe(props['reframe'],asset['duration_ticks'])
+        if any(k in props and (not isinstance(props[k],str) or len(props[k])>4000) for k in ('rights','attribution')): raise ValueError('Invalid music rights metadata.')
         gain=props.get('audioGainDb',0)
         if type(gain) not in (float,int) or not math.isfinite(gain) or not -60<=gain<=24: raise ValueError('Audio gain must be between -60 and 24 dB.')
         provenance=props.get('sourceProvenance')
@@ -240,6 +246,8 @@ COMMAND_FIELDS={
  'gain':({'clipId','gainDb'},set()),'fades':({'clipId','fadeInTicks','fadeOutTicks'},set()),
  'caption':({'clipId','text'},{'sourceInTicks','sourceOutTicks'}),'marker':({'atTicks','label'},{'markerId'}),
  'edit_caption':({'captionId','text'},set()),
+ 'music_rights':({'clipId','rights','attribution'},set()),
+ 'reframe':({'clipId','settings'},set()),
  'remove_marker':({'markerId'},set()),'track':({'kind','name'},set())}
 
 def _apply(doc,state,command):
@@ -313,6 +321,17 @@ def _apply(doc,state,command):
         if type(delta) is not int or abs(delta)>2**53-1: raise ValueError('Ripple delta must be an integer.')
         if any(c['trackId']==track and c['timelineStartTicks']<at<c['timelineStartTicks']+c['timelineDurationTicks'] for c in doc['clips'] if c['itemType'] in ('clip','audio')): raise ValueError('Split clips before rippling through them.')
         _shift(doc,track,at,delta)
+    elif kind=='reframe':
+        from .reframe_engine import validate_reframe
+        asset=next(a for a in state['assets'] if a['id']==clip['assetId'])
+        settings=validate_reframe(command['settings'],asset['duration_ticks'])
+        old=clip['properties'].get('reframe')
+        if old and old.get('locked') and settings.get('locked') and settings!=old: raise ValueError('Unlock this crop before changing its framing.')
+        clip['properties']['reframe']=settings
+    elif kind=='music_rights':
+        if clip['itemType'] != 'audio': raise ValueError('Select a user-imported audio bed.')
+        if any(not isinstance(command[k],str) or len(command[k])>4000 for k in ('rights','attribution')): raise ValueError('Music rights and attribution must be text up to 4000 characters.')
+        clip['properties'].update(userSupplied=True,rights=command['rights'],attribution=command['attribution'])
     elif kind=='gain': clip['properties']['audioGainDb']=command['gainDb']
     elif kind=='fades': clip['properties'].update(fadeInTicks=command['fadeInTicks'],fadeOutTicks=command['fadeOutTicks'],videoFadeInTicks=command['fadeInTicks'],videoFadeOutTicks=command['fadeOutTicks'])
     elif kind=='caption':
@@ -401,6 +420,11 @@ def compile_plan(store,plan_id,section_ids,expected_review_version,expected_revi
         evidence=_evidence(store,plan,verify_sources=True,runtime=runtime)
         if evidence['fingerprint']!=plan.get('evidenceFingerprint'): raise ProjectError('Planning evidence is stale. Generate a fresh plan.')
         validate_written_plan(plan,evidence)
+        if plan.get('outputProfile'):
+            from .export_profiles import validate_profile
+            profile = validate_profile(plan['outputProfile'])
+            if state['settings'].get('outputProfile') != profile:
+                raise ValueError('Select and save the written plan output profile before compiling this version.')
         if not isinstance(section_ids,list) or not section_ids or len(section_ids)!=len(set(section_ids)): raise ValueError('Select approved sections exactly once.')
         selected=[s for s in plan['sections'] if s['id'] in section_ids]
         if len(selected)!=len(section_ids) or any(s['status']!='approved' for s in selected): raise ValueError('Only explicitly approved sections may be compiled.')
@@ -415,5 +439,7 @@ def compile_plan(store,plan_id,section_ids,expected_review_version,expected_revi
                 _apply(doc,state,{'type':'insert','trackId':track,'assetId':candidate['assetId'],'sourceInTicks':candidate['sourceInTicks'],'sourceOutTicks':candidate['sourceOutTicks'],'atTicks':at})
                 doc['clips'][-1]['properties'].update(planId=plan_id,sectionId=section['id'],candidateId=cid,sectionLabel=section['title'],modelProvenance=deepcopy(plan['provenance']))
                 if not any(m.get('sectionId')==section['id'] and m.get('planId')==plan_id for m in doc['markers']): doc['markers'].append({'id':_id(),'atTicks':at,'label':section['title'],'sectionId':section['id'],'planId':plan_id})
+        if plan.get('outputProfile') and max((c['timelineStartTicks']+c['timelineDurationTicks'] for c in doc['clips']),default=0) > plan['outputProfile']['maxDurationSeconds']*1_000_000:
+            raise ValueError('Compiled timeline would exceed the reviewed export profile maximum duration.')
         _validate(doc,state); doc['undo']=(doc['undo']+[{'command':{'type':'compile_plan','planId':plan_id,'sectionIds':section_ids},'before':before,'after':_snapshot(doc)}])[-LIMIT:]; doc['redo']=[]
     return _transaction(store,expected_revision,mutate)

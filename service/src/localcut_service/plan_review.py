@@ -12,7 +12,7 @@ from .planning import collect_evidence, recompute_plan, validate_written_plan
 def _evidence(store, plan, *, verify_sources=False, runtime=None):
     return collect_evidence(store, plan['briefId'], plan['assetId'],
         query=plan.get('query', ''), search_mode=plan.get('searchMode', 'exact'),
-        verify_sources=verify_sources, runtime=runtime)
+        verify_sources=verify_sources, runtime=runtime,output_profile=plan.get('outputProfile'),output_index=plan.get('outputIndex',0))
 
 
 def _freshness(store, plan, runtime=None):

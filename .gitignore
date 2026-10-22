@@ -59,3 +59,6 @@ Thumbs.db
 *.pem
 *.key
 ggml-*.bin
+validation-artifacts/
+target-ui-refresh/
+release-service-results.xml

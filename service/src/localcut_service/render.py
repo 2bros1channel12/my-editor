@@ -8,16 +8,18 @@ import math
 from pathlib import Path
 import re
 import shutil
+import textwrap
 from typing import Any
 import uuid
 
 from .jobs import JobContext, JobInput, JobOutput
 from .persistence import ProjectStore, _connect, _json, _now
 from .proxies import MediaProcess, rotation, source_digest, source_path, video_stream
+from .finishing import render_options, finish_audio
 
 GENERATOR_ID = "localcut-ffmpeg-renderer"
-GENERATOR_VERSION = "8"
-PIPELINE_VERSION = "h264-mp4-8"
+GENERATOR_VERSION = "10"
+PIPELINE_VERSION = "h264-mp4-10"
 TICKS_PER_SECOND = 1_000_000
 
 
@@ -108,7 +110,8 @@ def _validate_av_end_alignment(probe: dict[str, Any], frames_per_second: int) ->
     return offset
 
 
-def render_job(store: ProjectStore, ffmpeg: str | None, ffprobe: str | None, *, burn_captions: bool = False) -> JobInput:
+def render_job(store: ProjectStore, ffmpeg: str | None, ffprobe: str | None, *, burn_captions: bool = False, options=None) -> JobInput:
+    options = render_options(options)
     with _connect(store.database_path) as db:
         db.execute("BEGIN")
         project = db.execute("SELECT state_revision FROM projects WHERE id=?", (store.project_id,)).fetchone()
@@ -116,17 +119,23 @@ def render_job(store: ProjectStore, ffmpeg: str | None, ffprobe: str | None, *, 
         if project is None or timeline is None:
             raise ValueError("Create a timeline with at least one video clip before exporting.")
         state = store.load_state(db)
+        if options['outputProfile'] is None and state['settings'].get('outputProfile'):
+            options = render_options({**options, 'outputProfile': state['settings']['outputProfile']})
         brief = db.execute("SELECT id,revision,constraints_json FROM briefs WHERE project_id=? ORDER BY revision DESC LIMIT 1", (store.project_id,)).fetchone()
         constraints = json.loads(brief["constraints_json"]) if brief else {}
         aspect_ratio = constraints.get("aspectRatio", "source")
         if aspect_ratio not in {"source", "16:9", "9:16", "1:1", "4:3"}:
             raise ValueError("The saved brief has an unsupported aspect ratio. Review and save the brief before exporting.")
         assets = {row["id"]: row for row in db.execute("SELECT * FROM assets WHERE project_id=?", (store.project_id,))}
-        clips = sorted((row for row in state["timelineItems"] if row["itemType"] == "clip" and row["trackId"] in {"video", "main_video"}), key=lambda row: (row["timelineStartTicks"], row["id"]))
-        audio_items = sorted((row for row in state["timelineItems"] if row["itemType"] == "audio" and row["trackId"] in {"audio", "music"}), key=lambda row: (row["timelineStartTicks"], row["id"]))
+        if any(row['itemType'] == 'overlay' for row in state['timelineItems']):
+            raise ValueError('Overlay rendering is unsupported. Remove the overlay before exporting.')
+        clips = sorted((row for row in state["timelineItems"] if row["itemType"] == "clip"), key=lambda row: (row["timelineStartTicks"], row["id"]))
+        audio_items = sorted((row for row in state["timelineItems"] if row["itemType"] == "audio"), key=lambda row: (row["timelineStartTicks"], row["id"]))
         if not clips:
             raise ValueError("Add at least one video clip to the timeline before exporting.")
         total_ticks = max(int(clip["timelineStartTicks"]) + int(clip["timelineDurationTicks"]) for clip in clips)
+        if options['outputProfile'] and total_ticks / TICKS_PER_SECOND > options['outputProfile']['maxDurationSeconds']:
+            raise ValueError('Timeline exceeds this editable export profile maximum duration. Shorten the timeline or change the profile.')
         for item in audio_items:
             start, length = int(item["timelineStartTicks"]), int(item["timelineDurationTicks"])
             source_in, source_out = int(item["sourceInTicks"]), int(item["sourceOutTicks"])
@@ -137,12 +146,15 @@ def render_job(store: ProjectStore, ffmpeg: str | None, ffprobe: str | None, *, 
             asset = assets.get(item["assetId"])
             if asset is None:
                 raise ValueError("The timeline references a missing video or audio source asset.")
+            a, b, start, length = (item.get(k) for k in ('sourceInTicks','sourceOutTicks','timelineStartTicks','timelineDurationTicks'))
+            if any(type(v) is not int for v in (a,b,start,length)) or a < 0 or b <= a or start < 0 or length <= 0 or b > asset['duration_ticks']:
+                raise ValueError('A render source range is invalid or exceeds the imported source duration.')
             asset_snapshots[asset["id"]] = {"id": asset["id"], "sha256": asset["sha256"]}
         captions = []
         for caption in state.get("captions", []):
             timeline_item = next((item for item in state["timelineItems"] if item["id"] == caption["timelineItemId"]), None)
             if timeline_item and timeline_item["itemType"] == "caption":
-                captions.append({"timelineStartTicks": timeline_item["timelineStartTicks"], "timelineDurationTicks": timeline_item["timelineDurationTicks"], "text": caption["text"], "language": caption["language"]})
+                captions.append({"timelineStartTicks": timeline_item["timelineStartTicks"], "timelineDurationTicks": timeline_item["timelineDurationTicks"], "text": caption["text"], "language": caption["language"], "style": caption.get('style', {})})
         if burn_captions:
             captions = _validated_captions(captions, total_ticks)
         if burn_captions and not captions:
@@ -154,7 +166,7 @@ def render_job(store: ProjectStore, ffmpeg: str | None, ffprobe: str | None, *, 
         raise ValueError("FFprobe is unavailable. Export requires FFprobe to validate its output.")
     ffmpeg_executable = ffmpeg if ffmpeg and Path(ffmpeg).is_file() else shutil.which("ffmpeg")
     ffprobe_executable = ffprobe if ffprobe and Path(ffprobe).is_file() else shutil.which("ffprobe")
-    enriched = {**snapshot, "ffmpegIdentity": _tool_identity(ffmpeg_executable), "ffprobeIdentity": _tool_identity(ffprobe_executable)}
+    enriched = {**snapshot, "options": options, "ffmpegIdentity": _tool_identity(ffmpeg_executable), "ffprobeIdentity": _tool_identity(ffprobe_executable)}
     fingerprint = _render_fingerprint(enriched)
     export_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"localcut-export:{fingerprint}"))
     duration_ticks = max(int(clip["timelineStartTicks"]) + int(clip["timelineDurationTicks"]) for clip in clips)
@@ -200,7 +212,7 @@ class RenderHandler:
         return list(config.get("clips", [])), list(config.get("audioItems", [])), assets
 
     def validate_job(self, job: JobInput) -> None:
-        if job.generator_id != GENERATOR_ID or job.generator_version != GENERATOR_VERSION or job.source_fingerprint != _render_fingerprint({key: job.config[key] for key in ("projectRevision", "timelineId", "timelineRevision", "briefId", "briefRevision", "aspectRatio", "clips", "audioItems", "assets", "captions", "burnCaptions", "ffmpegIdentity", "ffprobeIdentity")}):
+        if job.generator_id != GENERATOR_ID or job.generator_version != GENERATOR_VERSION or job.source_fingerprint != _render_fingerprint({key: job.config[key] for key in ("projectRevision", "timelineId", "timelineRevision", "briefId", "briefRevision", "aspectRatio", "clips", "audioItems", "assets", "captions", "burnCaptions", "options", "ffmpegIdentity", "ffprobeIdentity")}):
             raise ValueError("Export input provenance is invalid.")
         if _tool_identity(str(job.config.get("ffmpeg", ""))) != job.config["ffmpegIdentity"] or _tool_identity(str(job.config.get("ffprobe", ""))) != job.config["ffprobeIdentity"]:
             raise ValueError("FFmpeg or FFprobe changed after this export was queued. Queue it again to validate with the installed tools.")
@@ -265,6 +277,25 @@ class RenderHandler:
             if int(current["clip"]["timelineStartTicks"]) < previous_end:
                 raise ValueError("Overlapping video clips are not supported by this export profile. Adjust the timeline and retry.")
         width, height, fps = self._output_profile(rows[0]["video"], str(context.input.config["aspectRatio"]))
+        options = render_options(context.input.config['options'])
+        if options['noiseReduction']:
+            listing = self.process.run([self.ffmpeg or 'ffmpeg', '-hide_banner', '-filters'], context, stage='checking noise reduction support')
+            if not re.search(r'\bafftdn\s', listing.decode('utf-8', 'replace')):
+                raise ValueError('This FFmpeg build has no afftdn noise reduction filter. Disable noise reduction or configure a supporting FFmpeg build.')
+        if options['outputProfile']:
+            from .export_profiles import resolve_profile
+            display_width, display_height = self._display_dimensions(rows[0]['video'])
+            resolved = resolve_profile(options['outputProfile'], display_width, display_height)
+            width, height, fps = resolved['width'], resolved['height'], resolved['frameRate']
+            if options['mode'] == 'preview' and max(width, height) > 1280:
+                scale = 1280 / max(width, height)
+                width, height = max(2, round(width*scale/2)*2), max(2, round(height*scale/2)*2)
+        else:
+            scale = options['resolution'] / min(width, height)
+            width, height = max(2, round(width * scale / 2) * 2), max(2, round(height * scale / 2) * 2)
+            if max(width, height) > 4096:
+                raise ValueError('Output exceeds 4096 pixels on the long edge. Select a smaller resolution or a standard aspect ratio.')
+            fps = options['frameRate']
         inputs: list[str] = [self.ffmpeg or "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-v", "error", "-xerror", "-n", "-progress", "pipe:1", "-protocol_whitelist", "file,pipe", "-copyts"]
         for row in rows:
             inputs += ["-i", str(row["path"])]
@@ -298,10 +329,27 @@ class RenderHandler:
             clip_seconds = duration_ticks / TICKS_PER_SECOND
             video_index = int(row["video"]["index"])
             video_chain = f"[{index}:{video_index}]trim=start={self._seconds(source_in)}:end={self._seconds(source_out)},setpts=PTS-STARTPTS"
+            framing = clip.get('properties', {}).get('reframe')
+            if framing is None and options['outputProfile'] and options['outputProfile']['fit'] == 'crop':
+                framing = dict(enabled=True, locked=False, mode='crop', subjectId=None, keyframes=[])
+            if framing is not None:
+                from .reframe_engine import framing_filter
+                sw, sh = self._display_dimensions(row['video'])
+                video_chain += f',scale={sw}:{sh},setsar=1'
+                video_chain += framing_filter(framing, sw, sh, width, height, source_in, int(row['asset']['duration_ticks']), fps, f'rf{index}')
             crop = {"punch_in_110": 1.10, "punch_in_125": 1.25}.get(str(clip.get("properties", {}).get("cropPreset", "full_frame")))
-            if crop:
+            if crop and framing is None:
                 video_chain += f",crop=iw/{crop:.2f}:ih/{crop:.2f}"
-            video_chain += f",scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},trim=duration={clip_seconds:.6f},setpts=PTS-STARTPTS"
+            fit_safe = options['outputProfile'] and ((framing is not None and (not framing['enabled'] or framing['mode']=='fit' or framing.get('layout')=='stacked' or any(k.get('layoutMode')=='fit' for k in framing['keyframes']))) or (framing is None and options['outputProfile']['fit']=='contain'))
+            if fit_safe:
+                safe = options['outputProfile']['safeArea']
+                usable_w = max(2,int(width*(1-safe['left']-safe['right']))//2*2)
+                usable_h = max(2,int(height*(1-safe['top']-safe['bottom']))//2*2)
+                x,y = int(width*safe['left']),int(height*safe['top'])
+                video_chain += f',scale={usable_w}:{usable_h}:force_original_aspect_ratio=decrease,pad={width}:{height}:{x}+({usable_w}-iw)/2:{y}+({usable_h}-ih)/2'
+            else:
+                video_chain += f",scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+            video_chain += f",setsar=1,fps={fps},trim=duration={clip_seconds:.6f},setpts=PTS-STARTPTS"
             video_fade_in = min(clip_seconds / 2, video_fade_in_ticks / TICKS_PER_SECOND)
             video_fade_out = min(clip_seconds / 2, video_fade_out_ticks / TICKS_PER_SECOND)
             if video_fade_in:
@@ -311,7 +359,7 @@ class RenderHandler:
             video_chain += f"[v{segment_count}]"
             filters.append(video_chain)
             video_labels.append(f"[v{segment_count}]")
-            audio = row["audio"]
+            audio = row["audio"] if clip.get('properties', {}).get('linkedAudio', True) else None
             audio_label = f"a{segment_count}"
             if audio:
                 audio_index = int(audio["index"])
@@ -325,7 +373,9 @@ class RenderHandler:
                     audio_chain += f",asetpts=PTS+{audio_gap:.6f}/TB,aresample=48000:async=1:first_pts=0"
                 else:
                     audio_chain += ",aresample=48000"
-                audio_chain += f",volume={gain:.3f}dB"
+                audio_chain += f",aformat=sample_fmts=fltp:channel_layouts=stereo,volume={gain + options['speechGainDb']:.3f}dB"
+                if options['noiseReduction']:
+                    audio_chain += ',afftdn=nf=-25'
                 fade_in = min(clip_seconds / 2, fade_in_ticks / TICKS_PER_SECOND)
                 fade_out = min(clip_seconds / 2, fade_out_ticks / TICKS_PER_SECOND)
                 if fade_in:
@@ -339,7 +389,7 @@ class RenderHandler:
             audio_labels.append(f"[{audio_label}]")
             cursor = start_at + duration_ticks
             segment_count += 1
-        filters.append("".join(video_labels + audio_labels) + f"concat=n={segment_count}:v=1:a=1[vout][aout]")
+        filters.append("".join(v + a for v, a in zip(video_labels, audio_labels)) + f"concat=n={segment_count}:v=1:a=1[vout][aout]")
         duration = total_ticks / TICKS_PER_SECOND
         audio_map = "[aout]"
         if bed_rows:
@@ -365,8 +415,10 @@ class RenderHandler:
                 bed += f",apad=pad_dur={duration:.6f},atrim=duration={duration:.6f}[bed{index}]"
                 filters.append(bed)
                 bed_labels.append(f"[bed{index}]")
-            filters.append("[aout]" + "".join(bed_labels) + f"amix=inputs={len(bed_labels)+1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[amixed]")
+            filters.append("[aout]" + "".join(bed_labels) + f"amix=inputs={len(bed_labels)+1}:duration=first:dropout_transition=0:normalize=0[amixed]")
             audio_map = "[amixed]"
+        filters.append(finish_audio(audio_map, options))
+        audio_map = '[afinished]'
         estimated = int(duration * 1_100_000 + 64 * 1024**2)
         if shutil.disk_usage(store.root).free < estimated + 256 * 1024**2:
             raise ValueError(f"Insufficient project disk space; approximately {estimated} bytes plus 256 MiB reserve required.")
@@ -382,11 +434,17 @@ class RenderHandler:
             if not has_ass and not has_subtitles:
                 raise ValueError("This FFmpeg build has no ASS/subtitles video filter. Install an FFmpeg build with libass support, or export without burned-in captions.")
             subtitle_file = context.stage_root / "captions.ass"
-            subtitle_file.write_text(self._ass_document(caption_rows, width, height), encoding="utf-8-sig")
+            subtitle_file.write_text(self._ass_document(caption_rows, width, height, options), encoding="utf-8-sig")
             filter_name = "ass" if has_ass else "subtitles"
             filters.append(f"[vout]{filter_name}=filename=captions.ass[vburn]")
             video_map = "[vburn]"
-        args = inputs + ["-filter_complex", ";".join(filters), "-map", video_map, "-map", audio_map, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-movflags", "+faststart", "-f", "mp4", str(output)]
+        graph = ';'.join(filters)
+        graph_args = ['-filter_complex', graph]
+        if len(graph) > 8000:
+            graph_path = context.staging_file('.filter.txt')
+            graph_path.write_text(graph, encoding='utf-8')
+            graph_args = ['-filter_complex_script', str(graph_path)]
+        args = inputs + graph_args + ["-map", video_map, "-map", audio_map, "-c:v", "libx264", "-preset", "veryfast", "-crf", "28" if options['mode'] == 'preview' else "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-movflags", "+faststart", "-f", "mp4", str(output)]
         self.process.run(args, context, duration=duration, stage="rendering H.264 MP4", base=0.05, span=0.75, timeout=max(3600, duration * 20), cwd=context.stage_root if payload["burnCaptions"] else None)
         context.report(.82, "validating rendered file")
         if not output.is_file() or output.stat().st_size < 1024:
@@ -395,6 +453,14 @@ class RenderHandler:
         out_video = video_stream(probe)
         if out_video.get("codec_name") != "h264":
             raise ValueError("Rendered file is not H.264 video.")
+        if not any(s.get('codec_type') == 'audio' and s.get('codec_name') == 'aac' for s in probe.get('streams', [])):
+            raise ValueError('Rendered file has no validated AAC audio stream.')
+        try:
+            output_rate = Fraction(str(out_video['avg_frame_rate']))
+        except (KeyError, ValueError, ZeroDivisionError) as exc:
+            raise ValueError('Rendered frame rate cannot be validated.') from exc
+        if output_rate != Fraction(str(fps)):
+            raise ValueError('Rendered frame rate does not match the selected preset.')
         if int(out_video.get("width", 0)) != width or int(out_video.get("height", 0)) != height:
             raise ValueError("Rendered dimensions do not match the selected project aspect ratio.")
         av_start_offset = _validate_av_start_alignment(probe, fps)
@@ -411,16 +477,63 @@ class RenderHandler:
         return JobOutput(str(output), f"exports/{context.input.config['exportId']}.mp4", "export:mp4", {"exportId": context.input.config["exportId"], "timelineId": context.input.config["timelineId"], "timelineRevision": context.input.config["timelineRevision"], "projectRevision": context.input.config["projectRevision"], "briefId": context.input.config["briefId"], "briefRevision": context.input.config["briefRevision"], "aspectRatio": context.input.config["aspectRatio"], "format": "mp4-h264-aac", "durationSeconds": duration, "audioVideoStartOffsetSeconds": av_start_offset, "audioVideoStartAlignmentValidated": True, "audioVideoEndOffsetSeconds": av_end_offset, "audioVideoEndAlignmentValidated": True, "burnCaptions": bool(payload["burnCaptions"]), "startedAt": context.input.config.get("startedAt", _now())})
 
     @staticmethod
-    def _ass_document(captions: list[dict[str, Any]], width: int, height: int) -> str:
+    def _ass_document(captions: list[dict[str, Any]], width: int, height: int, options=None) -> str:
+        options = render_options(options)
         def stamp(ticks: int) -> str:
             centiseconds = max(0, round(ticks / 10_000)); hours, centiseconds = divmod(centiseconds, 360_000); minutes, centiseconds = divmod(centiseconds, 6_000); seconds, centiseconds = divmod(centiseconds, 100)
             return f"{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}"
         lines = ["[Script Info]", "ScriptType: v4.00+", f"PlayResX: {width}", f"PlayResY: {height}", "WrapStyle: 2", "ScaledBorderAndShadow: yes", "", "[V4+ Styles]", "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding", f"Style: Default,Arial,{max(24,round(height*0.052))},&H00FFFFFF,&H0000FFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,40,40,40,1", "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
-        for caption in sorted(captions, key=lambda row: int(row["timelineStartTicks"])):
+        for index, caption in enumerate(sorted(captions, key=lambda row: int(row["timelineStartTicks"]))):
+            caption = dict(caption)
+            profile = options.get('outputProfile')
+            if profile:
+                safe = profile['safeArea']
+                font = max(12, round(height * .052))
+                columns = max(4, int(width * (1-safe['left']-safe['right']) / font))
+                caption['text'] = '\n'.join(textwrap.wrap(' '.join(str(caption['text']).split()), width=columns, break_long_words=True))
             start = int(caption["timelineStartTicks"]); end = start + int(caption["timelineDurationTicks"])
             text = str(caption["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\r", "\n").replace("\n", r"\N")
-            lines.append(f"Dialogue: 0,{stamp(start)},{stamp(end)},Default,,0,0,0,,{text}")
+            style_name = 'Default'
+            if caption.get('style'):
+                from .finishing_captions import caption_settings
+                saved = caption_settings(caption['style'])
+                style_name = f'Caption{index}'
+                margin_x = round(width * saved['safeAreaPercent'] / 100)
+                margin_y = round(height * saved['safeAreaPercent'] / 100)
+                font_size = max(12, round(height * (.065 if saved['style'] == 'large' else .052)))
+                # Conservative one-em glyph width keeps even long portrait lines
+                # inside the horizontal safe region instead of clipping text.
+                longest = max((len(line) for line in str(caption['text']).splitlines()), default=1)
+                font_size = max(1, min(font_size, int((width - 2 * margin_x) / max(1, longest)), int((height - 2 * margin_y) / max(1, len(str(caption['text']).splitlines())))))
+                border = 3 if saved['style'] == 'boxed' else 1
+                lines.insert(lines.index('[Events]'), f'Style: {style_name},Arial,{font_size},&H00FFFFFF,&H0000FFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,{border},2,1,2,{margin_x},{margin_x},{margin_y},1')
+            if profile:
+                # Profile margins override placement, while preserving each caption's local style.
+                style_name = f'FormatCaption{index}'
+                local_style = saved['style'] if caption.get('style') else options['captionStyle']
+                font_size = max(1, min(round(height*(.065 if local_style=='large' else .052)), int(height*(1-safe['top']-safe['bottom']) / max(1,len(str(caption['text']).splitlines())))))
+                longest = max(map(len,str(caption['text']).splitlines()),default=1)
+                font_size = min(font_size,max(1,int(width*(1-safe['left']-safe['right'])/max(1,longest))))
+                border = 3 if local_style == 'boxed' else 1
+                lines.insert(lines.index('[Events]'), f'Style: {style_name},Arial,{font_size},&H00FFFFFF,&H0000FFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,{border},2,1,2,{round(width*safe["left"])},{round(width*safe["right"])},{round(height*safe["bottom"])},1')
+            lines.append(f"Dialogue: 0,{stamp(start)},{stamp(end)},{style_name},,0,0,0,,{text}")
+        margin_x, margin_y = round(width * options['safeArea']), round(height * options['safeArea'])
+        size = max(12, round(height * (.065 if options['captionStyle'] == 'large' else .052)))
+        border = 3 if options['captionStyle'] == 'boxed' else 1
+        lines = [f'Style: Default,Arial,{size},&H00FFFFFF,&H0000FFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,{border},2,1,2,{margin_x},{margin_x},{margin_y},1' if line.startswith('Style: Default,') else line for line in lines]
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _display_dimensions(stream):
+        width, height = int(stream['width']), int(stream['height'])
+        try:
+            sar = Fraction(str(stream.get('sample_aspect_ratio', '1:1')).replace(':', '/'))
+            if sar <= 0: sar = Fraction(1)
+        except (ValueError, ZeroDivisionError):
+            sar = Fraction(1)
+        width = max(2, round(width * float(sar) / 2) * 2)
+        if rotation(stream) % 180: width, height = height, width
+        return width, height
 
     @staticmethod
     def _output_profile(stream: dict[str, Any], aspect_ratio: str = "source") -> tuple[int, int, int]:
@@ -477,6 +590,7 @@ class RenderHandler:
             measured_end_offset = None
             end_alignment_validated = False
         settings = {
+            "finishing": job_input.config['options'],
             "timelineRevision": job_input.config["timelineRevision"],
             "projectRevision": job_input.config["projectRevision"],
             "briefId": job_input.config["briefId"],
@@ -520,6 +634,11 @@ def export_srt(store: ProjectStore) -> dict[str, Any]:
     records = []
     for index, (start, length, text) in enumerate(sorted(captions), 1):
         safe_text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if state['settings'].get('outputProfile'):
+            from .export_profiles import validate_profile
+            profile=validate_profile(state['settings']['outputProfile']); safe=profile['safeArea']
+            columns=max(4,int(profile['width']*(1-safe['left']-safe['right'])/(profile['height']*.052)))
+            safe_text='\n'.join(textwrap.wrap(' '.join(safe_text.split()),width=columns,break_long_words=True))
         records.append(f"{index}\n{stamp(start)} --> {stamp(start + length)}\n{safe_text}")
     from .persistence import atomic_write
     relative = f"exports/timeline-r{timeline['revision']}.srt"

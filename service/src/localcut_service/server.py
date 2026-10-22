@@ -26,14 +26,21 @@ from .style_recipes import recipe_catalog, propose_recipe, GENERATOR_ID as RECIP
 from .runtime_service import configured_runtime, runtime_status, summarize_asset
 from .model_runtime import RuntimeFailure
 from .footage_index import IndexHandler, indexing_job, search_index, index_status
-from .planning import PlanningHandler, planning_job
+from .planning import PlanningHandler, planning_job, planning_output_jobs
 from .revisions import revision_list, revision_generate, revision_propose, revision_decide
 from .timeline import timeline_state, timeline_command, timeline_undo, timeline_redo, compile_plan
 from .plan_review import list_written_plans, review_plan
 from .suggestions import SuggestionHandler, proposal_job
 from .render import RenderHandler, render_job, list_exports, export_srt
+from .interchange import export_otio
+from .finishing_captions import generate_captions
 from .maintenance import cache_snapshot, clear_generated_cache
+from .release_controls import privacy_status, storage_review, storage_remove
+from .sample_project import create_sample_project
 from .reference_traits import analyze_reference, GENERATOR_ID as REFERENCE_GENERATOR_ID, GENERATOR_VERSION as REFERENCE_GENERATOR_VERSION, validate_traits
+from .output_service import output_state, save_profile, reframe_job, ReframeHandler, framing_results
+from .output_variants import list_variants, save_variant, select_variant
+from .export_profiles import parse_output_request
 
 _INTEGRITY_DIGEST_CACHE = IntegrityDigestCache()
 
@@ -97,7 +104,7 @@ def _analysis_artifact_matches_row(data: dict[str, Any], row: dict[str, Any]) ->
 
 
 def handlers(config):
-    return {"proxy": ProxyHandler(config.ffmpeg_path, config.ffprobe_path), "transcription": TranscriptionHandler(), "model_download": ModelDownloadHandler(), "analysis": AnalysisHandler(config.ffmpeg_path), "suggestion": SuggestionHandler(), "rendering": RenderHandler(config.ffmpeg_path, config.ffprobe_path), "indexing": IndexHandler(configured_runtime(config)), "planning": PlanningHandler(configured_runtime(config))}
+    return {"proxy": ProxyHandler(config.ffmpeg_path, config.ffprobe_path), "transcription": TranscriptionHandler(), "model_download": ModelDownloadHandler(), "analysis": AnalysisHandler(config.ffmpeg_path), "suggestion": SuggestionHandler(), "rendering": RenderHandler(config.ffmpeg_path, config.ffprobe_path), "indexing": IndexHandler(configured_runtime(config)), "planning": PlanningHandler(configured_runtime(config)), "reframing": ReframeHandler()}
 
 
 def _annotate_source_availability(store: ProjectStore, state: dict[str, Any]) -> None:
@@ -121,12 +128,55 @@ def _annotate_source_availability(store: ProjectStore, state: dict[str, Any]) ->
 
 
 def dispatch(method: str, params: dict[str, Any], config: AppConfig, jobs: JobQueue | None = None, preview: PreviewServer | None = None) -> dict[str, Any]:
-    if (method.startswith("job_") or method in {"proxy_generate", "transcription_generate", "model_download", "analysis_run", "proposal_generate", "planning_generate", "export_generate", "index_build"}) and jobs is None:
+    if method == 'sample_create':
+        result = create_sample_project(config)
+        ProjectCatalog(config.data_dir).remember(Path(result['path']))
+        return result
+    if method == 'privacy_status':
+        return privacy_status(ProjectStore.open(Path(params['path'])), config)
+    if method == 'storage_review':
+        return storage_review(ProjectStore.open(Path(params['path'])), params['scope'], params.get('model'))
+    if method == 'storage_remove':
+        if params.get('scope') == 'project' and jobs is None:
+            owned = JobQueue(config.data_dir, concurrency=config.job_concurrency, handlers=handlers(config), autostart=False)
+            try:
+                return dispatch(method, params, config, owned, preview)
+            finally:
+                owned.close()
+        from .storage_lock import STORAGE_LOCK
+        store = ProjectStore.open(Path(params['path']))
+        with STORAGE_LOCK:
+            reviewed = storage_review(store, params['scope'], params.get('model'))
+            if reviewed['confirmationToken'] != params['confirmationToken'] or not reviewed['canRemove']:
+                raise ValueError('Storage changed or work is active. Review storage again before removal.')
+            if params['scope'] == 'project':
+                jobs.forget_project(store.project_id, cleanup_staging=False)
+            result = storage_remove(store, params['scope'], params['confirmationToken'], params.get('model'), ProjectCatalog(config.data_dir))
+        if result.get('projectDeleted') and preview is not None:
+            preview.revoke_root(store.root)
+        return result
+    if (method.startswith("job_") or method in {"proxy_generate", "transcription_generate", "model_download", "analysis_run", "proposal_generate", "planning_generate", "planning_outputs", "export_generate", "index_build", "reframe_generate"}) and jobs is None:
         owned = JobQueue(config.data_dir, concurrency=config.job_concurrency, handlers=handlers(config), autostart=False)
         try:
             return dispatch(method, params, config, owned, preview)
         finally:
             owned.close()
+    if method == 'output_request':
+        return parse_output_request(params['text'])
+    if method == 'output_profiles':
+        return output_state(ProjectStore.open(Path(params['path'])))
+    if method == 'output_profile_save':
+        return save_profile(ProjectStore.open(Path(params['path'])),params['profile'],params['expectedRevision'])
+    if method == 'output_variants':
+        return list_variants(ProjectStore.open(Path(params['path'])))
+    if method == 'output_variant_save':
+        return save_variant(ProjectStore.open(Path(params['path'])),params['name'],params['profile'],params['expectedRevision'],params.get('planIds'))
+    if method == 'output_variant_select':
+        return select_variant(ProjectStore.open(Path(params['path'])),params['variantId'],params['expectedRevision'])
+    if method == 'reframe_generate':
+        return jobs.submit(reframe_job(ProjectStore.open(Path(params['path'])),params['clipId'],params['profile'],config.ffmpeg_path,params.get('subjectId'),params.get('keepBoth',False)))
+    if method == 'reframe_results':
+        return framing_results(ProjectStore.open(Path(params['path'])),params['assetId'])
     if method == "runtime_status":
         return runtime_status(config)
     if method == "runtime_summarize":
@@ -372,7 +422,11 @@ def dispatch(method: str, params: dict[str, Any], config: AppConfig, jobs: JobQu
         return {"briefs": ProjectStore.open(Path(params["path"])).list_briefs()}
     if method == "planning_generate":
         store = ProjectStore.open(Path(params["path"]))
-        return jobs.submit(planning_job(store, str(params["briefId"]), str(params["assetId"]), configured_runtime(config), params.get("query", ""), params.get("searchMode", "exact")))
+        return jobs.submit(planning_job(store, str(params["briefId"]), str(params["assetId"]), configured_runtime(config), params.get("query", ""), params.get("searchMode", "exact"),params.get('outputProfile'),params.get('outputIndex',0)))
+    if method == 'planning_outputs':
+        store=ProjectStore.open(Path(params['path']))
+        requests=planning_output_jobs(store,str(params['briefId']),str(params['assetId']),configured_runtime(config),params.get('query',''),params.get('searchMode','exact'))
+        return {'jobs':[jobs.submit(request) for request in requests]}
     if method == "planning_list":
         return {"plans": list_written_plans(ProjectStore.open(Path(params["path"])), params.get("briefId"), runtime=configured_runtime(config))}
     if method == "planning_review":
@@ -391,11 +445,29 @@ def dispatch(method: str, params: dict[str, Any], config: AppConfig, jobs: JobQu
         return store.decide_edit_plan_suggestion(str(params["planId"]), str(params["suggestionId"]), str(params["decision"]), expected_revision=params.get("expectedRevision"), create_captions=params.get("createCaptions", False))
     if method == "export_generate":
         store = ProjectStore.open(Path(params["path"]))
-        return jobs.submit(render_job(store, config.ffmpeg_path, config.ffprobe_path, burn_captions=bool(params.get("burnCaptions", False))))
+        if type(params.get('burnCaptions', False)) is not bool:
+            raise ValueError('Caption mode must be a boolean.')
+        return jobs.submit(render_job(store, config.ffmpeg_path, config.ffprobe_path, burn_captions=params.get("burnCaptions", False), options=params.get('options')))
     if method == "export_list":
-        return {"exports": list_exports(ProjectStore.open(Path(params["path"]))) }
+        store = ProjectStore.open(Path(params['path']))
+        rows = list_exports(store)
+        if params.get('previewExportId'):
+            from .persistence import _sha256_file
+            row = next((r for r in rows if r['id'] == params['previewExportId'] and r['status'] == 'completed' and r['format'] == 'mp4-h264-aac'), None)
+            if row is None or preview is None:
+                raise ValueError('Completed render preview is unavailable.')
+            path = (store.root / row['relativePath']).resolve(strict=True)
+            path.relative_to((store.root / 'exports').resolve())
+            if _sha256_file(path) != row['checksumSha256']:
+                raise ValueError('Rendered file changed or is corrupt. Queue a fresh render.')
+            row['playbackUrl'] = preview.register(path)
+        return {"exports": rows}
     if method == "export_srt":
         return export_srt(ProjectStore.open(Path(params["path"])))
+    if method == 'export_otio':
+        return export_otio(ProjectStore.open(Path(params['path'])))
+    if method == 'caption_generate':
+        return generate_captions(ProjectStore.open(Path(params['path'])), params['expectedRevision'], params.get('settings'))
     if method == "proxy_generate":
         store = ProjectStore.open(Path(params["path"]))
         profile = collect_capabilities(store.root, ffmpeg_path=config.ffmpeg_path, ffprobe_path=config.ffprobe_path)

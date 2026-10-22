@@ -17,7 +17,7 @@
     "active": true,
     "targets": ["nsis"],
     "externalBin": ["binaries/localcut-service"],
-    "resources": ["../resources/THIRD_PARTY_NOTICES.md", "../resources/licenses/Python-LICENSE.txt", "../resources/licenses/PyInstaller-COPYING.txt", "../resources/licenses/JavaScript-THIRD-PARTY.txt", "../resources/licenses/Rust-THIRD-PARTY.txt"],
+    "resources": ["../resources/THIRD_PARTY_NOTICES.md", "../resources/licenses/Python-LICENSE.txt", "../resources/licenses/PyInstaller-COPYING.txt", "../resources/licenses/Python-THIRD-PARTY.txt", "../resources/licenses/JavaScript-THIRD-PARTY.txt", "../resources/licenses/Rust-THIRD-PARTY.txt"],
     "shortDescription": "Private local-first video editing assistant"
   }
 }

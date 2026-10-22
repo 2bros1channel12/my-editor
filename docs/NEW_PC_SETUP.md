@@ -22,6 +22,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev.ps1
 
 The launcher selects this checkout's virtual environment and service source automatically. Tauri starts Vite through its existing development configuration. If Rust cannot locate the MSVC linker, run from the Visual Studio Developer PowerShell or repair the C++ build tools installation. Browser-only `npm run dev` can show the UI but does not provide the native Tauri service bridge.
 
+## Generated sample project
+
+The first-run sample action creates six seconds of local test-pattern video with tone audio, managed media, an explicitly authored demonstration transcript, a brief, and an editable timeline/caption. It needs FFmpeg/FFprobe but no network connection or AI model. Sample media and authored demo text are CC0-1.0. This demonstrates the edit/export mechanics; use actual speech footage and a verified installed model to evaluate transcription accuracy.
+
 ## Keep source work synchronized
 
 Before editing on a PC, pull the latest commits. Commit and push finished work before switching PCs. Do not copy node_modules, virtual environments, or Rust target folders between machines; recreate them using the lockfiles and commands above. Installing dependencies does not download AI model weights automatically.
@@ -39,4 +43,4 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-For packaging and remaining release limits, see PACKAGING.md. The repository currently provides a development app, not a verified ready-to-install release.
+For packaging and remaining release gates, see PACKAGING.md. A Windows x64 NSIS installer can now be built locally; clean-machine installation and release qualification are still pending.
